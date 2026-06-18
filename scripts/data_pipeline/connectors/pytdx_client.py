@@ -62,3 +62,50 @@ def fetch_bars_payload(api, *, category: int, market: int, code: str, start: int
 
 def fetch_xdxr_payload(api, *, market: int, code: str):
     return list(api.get_xdxr_info(market, code) or [])
+
+
+def fetch_security_count_payload(api, market: int) -> int:
+    return int(api.get_security_count(market) or 0)
+
+
+def fetch_security_list_payload(api, *, market: int, start: int):
+    # get_security_list returns up to 1000 rows per call; it takes no count arg.
+    return list(api.get_security_list(market, start) or [])
+
+
+def fetch_transaction_payload(api, *, market: int, code: str, start: int, count: int):
+    return list(api.get_transaction_data(market, code, start, count) or [])
+
+
+def fetch_history_transaction_payload(
+    api, *, market: int, code: str, start: int, count: int, date: int
+):
+    return list(api.get_history_transaction_data(market, code, start, count, date) or [])
+
+
+def fetch_company_info_category_payload(api, *, market: int, code: str):
+    return list(api.get_company_info_category(market, code) or [])
+
+
+def fetch_company_info_content_payload(
+    api, *, market: int, code: str, filename: str, start: int, length: int
+) -> str:
+    # get_company_info_content returns the section TEXT (not a list).
+    return api.get_company_info_content(market, code, filename, start, length) or ''
+
+
+def fetch_minute_time_payload(api, *, market: int, code: str):
+    return list(api.get_minute_time_data(market, code) or [])
+
+
+def fetch_history_minute_time_payload(api, *, market: int, code: str, date: int):
+    return list(api.get_history_minute_time_data(market, code, date) or [])
+
+
+def fetch_finance_payload(api, *, market: int, code: str) -> dict:
+    # get_finance_info returns a dict (股本结构 snapshot), not a list.
+    return dict(api.get_finance_info(market, code) or {})
+
+
+def fetch_index_bars_payload(api, *, category: int, market: int, code: str, start: int = 0, count: int = 800):
+    return list(api.get_index_bars(category, market, code, start, count) or [])

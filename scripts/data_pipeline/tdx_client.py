@@ -11,9 +11,20 @@ from scripts.data_pipeline.connectors.pytdx_client import (
     connected_session,
     create_hq_api,
     fetch_bars_payload,
+    fetch_company_info_category_payload,
+    fetch_company_info_content_payload,
+    fetch_finance_payload,
+    fetch_history_transaction_payload,
+    fetch_history_minute_time_payload,
+    fetch_index_bars_payload,
+    fetch_minute_time_payload,
+    fetch_security_list_payload,
+    fetch_security_count_payload,
+    fetch_transaction_payload,
     fetch_xdxr_payload,
 )
 from scripts.data_pipeline.extractors.tdx_bars import CATEGORY_TO_TABLE, bars_to_dataframe
+from scripts.data_pipeline.extractors.tdx_index_bars import index_bars_to_dataframe
 from scripts.data_pipeline.extractors.tdx_xdxr import normalize_xdxr_rows
 from scripts.data_pipeline.fetch_realtime_watchlist import (
     fetch_exhq_snapshot_rows,
@@ -21,7 +32,13 @@ from scripts.data_pipeline.fetch_realtime_watchlist import (
     infer_hq_market,
     is_mainland_symbol,
 )
+from scripts.data_pipeline.code_mapping import hq_market_label
 from scripts.data_pipeline.jobs.minute_job import minute_frequency_to_category
+from scripts.data_pipeline.jobs.security_list_job import run_security_list_job
+from scripts.data_pipeline.jobs.transaction_job import run_transaction_job
+from scripts.data_pipeline.jobs.minute_time_job import run_minute_time_job
+from scripts.data_pipeline.jobs.company_info_job import run_company_finance_job
+from scripts.data_pipeline.jobs.finance_capital_job import run_finance_capital_job
 from scripts.data_pipeline.materializers.symbol_writer import write_by_symbol
 
 DEFAULT_DATA_ROOT = Path('data')
@@ -66,6 +83,7 @@ class TdxDownloader:
         market: int,
         code: str,
         max_bars: int | None,
+        fetch=fetch_bars_payload,
     ) -> list[dict]:
         rows: list[dict] = []
         start = 0
@@ -76,7 +94,7 @@ class TdxDownloader:
                 if remaining <= 0:
                     break
                 count = min(PAGE_SIZE, remaining)
-            page = fetch_bars_payload(
+            page = fetch(
                 api,
                 category=category,
                 market=market,
@@ -179,6 +197,234 @@ class TdxDownloader:
             df = df.sort_values('trade_date', ascending=True).reset_index(drop=True)
             df = df.drop_duplicates()
         write_by_symbol(self.data_root, 'xdxr', df)
+        return df
+
+    # ------------------------------------------------------------------
+    # download: security list (full-market enumeration snapshot)
+    # ------------------------------------------------------------------
+    def download_security_list(self, market: int) -> pd.DataFrame:
+        """Page the HQ security list for ``market`` (0=SZ, 1=SH) and persist a
+        daily snapshot to ``data/security_list/market=<SZ|SH>/date=<YYYYMMDD>/``.
+        Returns the written snapshot (market/date restored from the partition).
+        """
+        if market not in (0, 1):
+            raise ValueError(
+                f'download_security_list supports HQ markets 0 (SZ) / 1 (SH); got {market!r}'
+            )
+
+        api = create_hq_api()
+        with connected_session(api):
+            result = run_security_list_job(
+                fetch_page=lambda start, count: fetch_security_list_payload(
+                    api, market=int(market), start=start
+                ),
+                fetch_count=lambda: fetch_security_count_payload(api, int(market)),
+                market=int(market),
+                trade_date=date.today().strftime('%Y%m%d'),
+                output_root=self.data_root,
+            )
+        # Read the leaf file directly; the ``market``/``date`` hive keys live in
+        # the path (above this file), so re-attach the market label explicitly.
+        df = pd.read_parquet(result['path'])
+        df['market'] = hq_market_label(int(market))
+        return df
+
+    # ------------------------------------------------------------------
+    # download: 分笔成交 tick (date-partitioned)
+    # ------------------------------------------------------------------
+    def _tick_only_mainland(self, code: str) -> tuple[int, str]:
+        market, channel = self._resolve_market(code)
+        if channel != 'hq':
+            raise ValueError(
+                f'tick download only supports mainland 6-digit codes; '
+                f'{code!r} resolves to channel {channel!r}.'
+            )
+        return int(market), channel
+
+    def download_tick(self, code: str, date) -> pd.DataFrame:
+        """Download a symbol's full-day 分笔成交 for ``date`` (int ``YYYYMMDD``
+        or ``YYYY-MM-DD``) and persist to
+        ``data/tdx_transactions/date=<YYYYMMDD>/ts_code=<...>/data.parquet``.
+        Returns the written rows with ``ts_code`` re-attached.
+        """
+        market, _ = self._tick_only_mainland(code)
+        trade_date = str(date).replace('-', '')
+        api = create_hq_api()
+        with connected_session(api):
+            result = run_transaction_job(
+                fetch_page=lambda start, count: fetch_history_transaction_payload(
+                    api, market=market, code=code, start=start, count=count, date=int(trade_date)
+                ),
+                market=market,
+                code=code,
+                trade_date=trade_date,
+                output_root=self.data_root,
+            )
+        df = pd.read_parquet(result['path'])
+        df['ts_code'] = result['ts_code']
+        return df
+
+    def download_tick_today(self, code: str) -> pd.DataFrame:
+        """Download today's (possibly intraday-incomplete) 分笔成交 for ``code``."""
+        market, _ = self._tick_only_mainland(code)
+        trade_date = date.today().strftime('%Y%m%d')
+        api = create_hq_api()
+        with connected_session(api):
+            result = run_transaction_job(
+                fetch_page=lambda start, count: fetch_transaction_payload(
+                    api, market=market, code=code, start=start, count=count
+                ),
+                market=market,
+                code=code,
+                trade_date=trade_date,
+                output_root=self.data_root,
+            )
+        df = pd.read_parquet(result['path'])
+        df['ts_code'] = result['ts_code']
+        return df
+
+    # ------------------------------------------------------------------
+    # download: F10 财务分析 indicators (per-symbol snapshot)
+    # ------------------------------------------------------------------
+    def download_company_finance(self, code: str) -> pd.DataFrame:
+        """Fetch the F10 ``财务分析`` section, parse 主要财务指标 into tidy long
+        format, and persist to ``data/company_finance/ts_code=<...>/`` (plus raw
+        text under ``data/company_info_raw/``). Returns the parsed indicators.
+        """
+        market, channel = self._resolve_market(code)
+        if channel != 'hq':
+            raise ValueError(
+                f'download_company_finance only supports mainland 6-digit codes; '
+                f'{code!r} resolves to channel {channel!r}.'
+            )
+        api = create_hq_api()
+        with connected_session(api):
+            result = run_company_finance_job(
+                fetch_category=lambda: fetch_company_info_category_payload(
+                    api, market=int(market), code=code
+                ),
+                fetch_content=lambda filename, start, length: fetch_company_info_content_payload(
+                    api, market=int(market), code=code, filename=filename, start=start, length=length
+                ),
+                market=int(market),
+                code=code,
+                output_root=self.data_root,
+            )
+        df = pd.read_parquet(
+            self.data_root / 'company_finance' / f'ts_code={result["ts_code"]}' / 'data.parquet'
+        )
+        df['ts_code'] = result['ts_code']
+        return df
+
+    # ------------------------------------------------------------------
+    # download: 分时数据 (intraday minute-time line)
+    # ------------------------------------------------------------------
+    def download_minute_time(self, code: str, date) -> pd.DataFrame:
+        """Download a symbol's full-session 分时 for ``date`` and persist to
+        ``data/minute_time/date=<YYYYMMDD>/ts_code=<...>/``."""
+        market, channel = self._resolve_market(code)
+        if channel != 'hq':
+            raise ValueError(
+                f'download_minute_time only supports mainland 6-digit codes; '
+                f'{code!r} resolves to channel {channel!r}.'
+            )
+        trade_date = str(date).replace('-', '')
+        api = create_hq_api()
+        with connected_session(api):
+            result = run_minute_time_job(
+                fetch=lambda: fetch_history_minute_time_payload(
+                    api, market=int(market), code=code, date=int(trade_date)
+                ),
+                market=int(market),
+                code=code,
+                trade_date=trade_date,
+                output_root=self.data_root,
+            )
+        df = pd.read_parquet(result['path'])
+        df['ts_code'] = result['ts_code']
+        return df
+
+    def download_minute_time_today(self, code: str) -> pd.DataFrame:
+        """Download today's (possibly intraday-incomplete) 分时 for ``code``."""
+        market, channel = self._resolve_market(code)
+        if channel != 'hq':
+            raise ValueError(
+                f'download_minute_time only supports mainland 6-digit codes; '
+                f'{code!r} resolves to channel {channel!r}.'
+            )
+        trade_date = date.today().strftime('%Y%m%d')
+        api = create_hq_api()
+        with connected_session(api):
+            result = run_minute_time_job(
+                fetch=lambda: fetch_minute_time_payload(api, market=int(market), code=code),
+                market=int(market),
+                code=code,
+                trade_date=trade_date,
+                output_root=self.data_root,
+            )
+        df = pd.read_parquet(result['path'])
+        df['ts_code'] = result['ts_code']
+        return df
+
+    # ------------------------------------------------------------------
+    # download: 股本结构 (get_finance_info snapshot)
+    # ------------------------------------------------------------------
+    def download_finance_capital(self, code: str) -> pd.DataFrame:
+        """Fetch the HQ 股本结构 snapshot (总股本/流通股本/国家股/法人股/B股 +
+        IPO/行业/省份) and persist to ``data/finance_capital/ts_code=<...>/``.
+        Returns the single-row snapshot."""
+        market, channel = self._resolve_market(code)
+        if channel != 'hq':
+            raise ValueError(
+                f'download_finance_capital only supports mainland 6-digit codes; '
+                f'{code!r} resolves to channel {channel!r}.'
+            )
+        api = create_hq_api()
+        with connected_session(api):
+            result = run_finance_capital_job(
+                fetch=lambda: fetch_finance_payload(api, market=int(market), code=code),
+                market=int(market),
+                code=code,
+                output_root=self.data_root,
+            )
+        df = pd.read_parquet(
+            self.data_root / 'finance_capital' / f'ts_code={result["ts_code"]}' / 'data.parquet'
+        )
+        df['ts_code'] = result['ts_code']
+        return df
+
+    # ------------------------------------------------------------------
+    # download: 指数 K 线 (index bars)
+    # ------------------------------------------------------------------
+    def download_index(self, code: str, *, market: int, max_bars: int | None = None) -> pd.DataFrame:
+        """Download an index's daily bars and persist to
+        ``data/index_daily/ts_code=<...>/``.
+
+        ``market`` must be given explicitly — index codes don't follow equity
+        prefix rules (e.g. 上证指数 ``000001`` is SH/market=1 despite the ``000``
+        prefix). category 9 = daily.
+        """
+        if market not in (0, 1):
+            raise ValueError(
+                f'download_index supports HQ markets 0 (SZ) / 1 (SH); got {market!r}'
+            )
+        api = create_hq_api()
+        with connected_session(api):
+            payload = self._fetch_bars_paged(
+                api,
+                category=DAILY_BAR_CATEGORY,
+                market=market,
+                code=code,
+                max_bars=max_bars,
+                fetch=fetch_index_bars_payload,
+            )
+        if not payload:
+            raise ValueError(f'No index bars returned for code {code!r} on market {market!r}')
+        df = index_bars_to_dataframe(payload, market=market, code=code)
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        df = df.sort_values('datetime', ascending=True).reset_index(drop=True)
+        df = df.drop_duplicates(subset=['datetime'])
+        write_by_symbol(self.data_root, 'index_daily', df)
         return df
 
     # ------------------------------------------------------------------
