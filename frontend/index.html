@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>A股量化数据终端 · Quant Terminal</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">量</span>
+    <div class="brand-text">
+      <h1>A股量化数据终端</h1>
+      <p>A-Share Quant Terminal · pytdx data</p>
+    </div>
+  </div>
+  <div class="topbar-stats" id="topbar-stats"></div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="overview">市场概览</button>
+  <button class="tab" data-tab="kline">K线主图</button>
+  <button class="tab" data-tab="minute">多周期分时</button>
+  <button class="tab" data-tab="ticks">逐笔成交</button>
+  <button class="tab" data-tab="fundamentals">公司基本面</button>
+</nav>
+
+<main class="content">
+
+  <!-- 概览 -->
+  <section class="panel active" data-panel="overview">
+    <div class="card-row" id="index-cards"></div>
+    <div class="grid-2">
+      <div class="chart-box"><h3>市场宽度 · 涨跌家数 (上证)</h3><div id="ch-breadth" class="chart"></div></div>
+      <div class="chart-box"><h3>指数走势</h3><div id="ch-index-line" class="chart"></div></div>
+    </div>
+  </section>
+
+  <!-- K线主图 -->
+  <section class="panel" data-panel="kline">
+    <div class="card-row" id="kline-cards"></div>
+    <div class="chart-box tall"><h3 id="kline-title">日线 K线 + 均线 + 布林带 + 成交量</h3><div id="ch-kline" class="chart"></div></div>
+    <div class="grid-2">
+      <div class="chart-box"><h3>MACD</h3><div id="ch-macd" class="chart"></div></div>
+      <div class="chart-box"><h3>RSI</h3><div id="ch-rsi" class="chart"></div></div>
+    </div>
+    <div class="chart-box"><h3>KDJ</h3><div id="ch-kdj" class="chart"></div></div>
+  </section>
+
+  <!-- 多周期分时 -->
+  <section class="panel" data-panel="minute">
+    <div class="controls">
+      <label>股票
+        <select id="min-sym"></select>
+      </label>
+      <label>周期
+        <select id="min-tf"></select>
+      </label>
+      <span class="muted" id="min-meta"></span>
+    </div>
+    <div class="chart-box tall"><h3 id="min-title">分时 K线</h3><div id="ch-minute" class="chart"></div></div>
+  </section>
+
+  <!-- 逐笔成交 -->
+  <section class="panel" data-panel="ticks">
+    <div class="card-row" id="tick-cards"></div>
+    <div class="grid-2">
+      <div class="chart-box"><h3>买卖盘分布</h3><div id="ch-tick-dist" class="chart"></div></div>
+      <div class="chart-box"><h3>分时成交价</h3><div id="ch-tick-price" class="chart"></div></div>
+    </div>
+    <div class="chart-box tall"><h3>分钟资金流向 · 主买(红) / 主卖(绿)</h3><div id="ch-tick-flow" class="chart"></div></div>
+  </section>
+
+  <!-- 公司基本面 -->
+  <section class="panel" data-panel="fundamentals">
+    <div class="card-row" id="fund-cards"></div>
+    <div class="controls">
+      <label>指标
+        <select id="fund-metric"></select>
+      </label>
+    </div>
+    <div class="chart-box tall"><h3 id="fund-title">财务指标趋势</h3><div id="ch-fund" class="chart"></div></div>
+    <div class="chart-box"><h3>F10 公司资料</h3><pre id="fund-info" class="f10"></pre></div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <span>数据来源：通达信 pytdx · 本地 parquet 离线渲染</span>
+  <span id="footer-meta"></span>
+</footer>
+
+<script src="assets/echarts.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

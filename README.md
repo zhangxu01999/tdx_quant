@@ -7,11 +7,23 @@
 
 ---
 
-## 目录结构（本次新增）
+## 目录结构
 
 ```
 scripts/data_pipeline/
-├── tdx_client.py                 # 高层下载封装 TdxDownloader
+├── tdx_client.py                 # 高层下载封装 TdxDownloader（全部下载入口）
+├── connectors/
+│   └── pytdx_client.py           # create_hq_api / connected_session / fetch_*_payload 原语
+├── extractors/                   # payload → DataFrame，每个接口一个 tdx_*.py
+│   ├── tdx_bars.py / tdx_xdxr.py # 日/分钟 K 线 + 除权除息
+│   ├── tdx_index_bars.py         # 指数 K 线（含涨跌家数）
+│   ├── tdx_transactions.py       # 分笔成交
+│   ├── tdx_minute_time.py        # 分时（每分钟一点）
+│   ├── tdx_finance.py            # 股本结构
+│   ├── tdx_company_info.py       # F10 财务分析文本解析
+│   └── tdx_security_list.py      # 全市场证券枚举
+├── jobs/                         # fetch + normalize + 落盘 的可复用任务
+│   └── *_job.py                  # daily / minute / transaction / minute_time / finance_capital / company_info / security_list ...
 ├── materializers/symbol_writer.py# write_by_symbol：按 ts_code 分区写 parquet
 ├── indicators/
 │   ├── trend.py                  # MA / EMA / MACD
@@ -56,15 +68,51 @@ snap    = dl.snapshot("000001")                # 实时快照(hq); snapshot("AAP
 - `download_daily/minute/xdxr` 仅支持沪深主板；非主板代码直接 `ValueError`。
 - 拉空 / 连接失败 → 直接 raise，不返回空表。
 
-### 落盘格式（按 ts_code 分区，每只股票一个文件）
+### 扩展接口（均在原 4 个接口之外补充）
 
+除上面的 `daily / minute / xdxr / snapshot`，`TdxDownloader` 另封装了 6 类接口（**均仅支持沪深主板 6 位代码**，非主板直接 `ValueError`）：
+
+```python
+sec   = dl.download_security_list(1)               # 全市场枚举快照(0=SZ / 1=SH)
+idx   = dl.download_index("000001", market=1)      # 指数 K 线；market 必须显式传(000001=上证指数,SH)
+tick  = dl.download_tick("000001", 20240610)       # 指定日分笔成交(YYYYMMDD 或 YYYY-MM-DD)
+tick0 = dl.download_tick_today("000001")           # 当日分笔成交(盘中可能不完整)
+mt    = dl.download_minute_time("000001", 20240610)# 指定日分时(每个交易日 ≈ 240 点)
+mt0   = dl.download_minute_time_today("000001")    # 当日分时
+fin   = dl.download_company_finance("000001")      # F10 主要财务指标(long 格式)
+cap   = dl.download_finance_capital("000001")      # 股本结构快照(单行)
 ```
-data/<domain>/ts_code=<代码.SZ|SH>/data.parquet
-```
 
-`<domain>` ∈ `daily`、`minute_5m|15m|30m|60m`、`xdxr`。每只股票一个文件，含其全部历史（覆盖写，非追加）。
+| 方法 | 含义 | 返回 DataFrame 关键列 |
+|------|------|------------------------|
+| `download_security_list(market)` | 全市场证券枚举（每日快照） | `ts_code, code, name, pre_close` |
+| `download_index(code, *, market, max_bars)` | 指数日 K 线 | `trade_date, open/high/low/close, vol, amount, up_count, down_count` |
+| `download_tick(code, date)` / `download_tick_today(code)` | 分笔成交（按日分区） | `time, price, vol, buyorsell, buyorsell_label` |
+| `download_minute_time(code, date)` / `..._today(code)` | 分时线（每分钟一点） | `minute_idx(0基序), price, vol` |
+| `download_company_finance(code)` | F10「主要财务指标」解析 | `metric, period, value_raw, value_num` |
+| `download_finance_capital(code)` | 股本结构（`get_finance_info` 快照，非利润表） | `zongguben, liutongguben, ipo_date, industry, province` |
 
-`ts_code` 作为分区键存在路径里（文件内不重复存），读时由 hive 分区还原；`pd.read_parquet('data/daily')` 可一次读回该 domain 下全部股票。
+- `download_index` 的 `market` **必须显式传入**：指数代码不遵循个股前缀规则（上证指数 `000001` 属沪市 market=1，与深市平安银行 `000001.SZ` 同码不同市）。
+- `download_company_finance` 另把 F10 原文落盘到 `data/company_info_raw/`，便于重解析；`value_num` 已把 `亿/万` 归一到元、文本/`-` 置 NaN。
+- `download_tick` / `download_minute_time` 的当日版本（`*_today`）盘前/盘中数据可能不完整，盘后才齐全。
+
+### 落盘格式
+
+按数据特性分三种分区方式，统一写 parquet：
+
+| 接口 | 域 `<domain>` | 分区布局 |
+|------|---------------|----------|
+| `download_daily` | `daily` | `ts_code=<...>/data.parquet`（覆盖写，全历史） |
+| `download_minute` | `minute_5m\|15m\|30m\|60m` | `ts_code=<...>/data.parquet` |
+| `download_xdxr` | `xdxr` | `ts_code=<...>/data.parquet` |
+| `download_index` | `index_daily` | `ts_code=<...>/data.parquet` |
+| `download_tick` / `download_tick_today` | `tdx_transactions` | `date=<YYYYMMDD>/ts_code=<...>/data.parquet`（按日分区，便于按日扫描/回填） |
+| `download_minute_time` / `..._today` | `minute_time` | `date=<YYYYMMDD>/ts_code=<...>/data.parquet` |
+| `download_company_finance` | `company_finance` | `ts_code=<...>/data.parquet`（+ 原文 `company_info_raw/`） |
+| `download_finance_capital` | `finance_capital` | `ts_code=<...>/data.parquet` |
+| `download_security_list` | `security_list` | `market=<SZ\|SH>/date=<YYYYMMDD>/`（每日快照） |
+
+`ts_code` / `date` / `market` 等分区键只存在路径里（文件内不重复存），读时由 hive 分区还原，`pd.read_parquet('data/daily')` 即可一次读回该 domain 下全部股票。`download_tick` / `download_minute_time` / `download_finance_capital` / `download_company_finance` 返回时会把这些键重新挂回 DataFrame 列上。
 
 ---
 
@@ -142,6 +190,55 @@ python -m scripts.data_pipeline.screener.run_screener \
 
 ---
 
+## 4. 前端可视化：`frontend/`（A股量化数据终端）
+
+把 `data/` 下的 parquet 导出为 JSON，用纯静态页面 + ECharts 离线渲染（无需后端服务）。
+
+```bash
+cd frontend
+python3 data_export.py          # 读 data/*.parquet -> assets/*.json
+python3 -m http.server 8765     # 任选端口本地预览
+# 浏览器打开 http://127.0.0.1:8765/
+```
+
+- **数据导出**：`data_export.py` 读取 `data/` 下全部域，写出 5 个 JSON（`overview / kline_daily / minute / ticks / fundamentals`）。重新下载数据后重跑即可刷新。
+- **页面**：`index.html` + `app.js` + `styles.css`；ECharts 已 vendor 在 `assets/echarts.min.js`，**完全离线、无 CDN 依赖**。
+
+### 视图 ↔ 数据来源
+
+每个视图消费的数据域（对应上面的下载接口）：
+
+| 视图 | JSON | 消费数据域（下载接口） |
+|------|------|------------------------|
+| 1. 市场概览 | `overview.json` | `index_daily`（`download_index`）+ `security_list`（`download_security_list`） |
+| 2. K 线主图 | `kline_daily.json` | `data/000001.SZ_indicators.parquet`（见下方说明） |
+| 3. 多周期分时 | `minute.json` | `minute_5m/15m/30m/60m`（`download_minute`） |
+| 4. 逐笔成交 | `ticks.json` | `tdx_transactions`（`download_tick`）+ `minute_time`（`download_minute_time`） |
+| 5. 公司基本面 | `fundamentals.json` | `company_finance`（`download_company_finance`）+ `finance_capital`（`download_finance_capital`）+ `company_info_raw` |
+
+> K 线主图需要一份**预计算指标**文件 `data/000001.SZ_indicators.parquet`（日 K 叠加全部指标列）。它由 `compute_all` 生成，不在下载流程里，需手动产出一次：
+>
+> ```bash
+> python3 -c "
+> from scripts.data_pipeline.tdx_client import TdxDownloader
+> from scripts.data_pipeline.indicators import compute_all
+> df = TdxDownloader('data').download_daily('000001')   # 或读已有 data/daily/ts_code=000001.SZ/
+> compute_all(df).to_parquet('data/000001.SZ_indicators.parquet', index=False)
+> "
+> ```
+
+### 5 个视图（涨=红/跌=绿，A股配色）
+
+1. **市场概览** — 沪深指数卡片 + 涨跌家数（市场宽度）+ 指数双轴走势
+2. **K线主图** — 日线 K线 + MA5/10/20 + 布林带 + 成交量 + MACD/RSI/KDJ（联动缩放）
+3. **多周期分时** — 股票 × {5/15/30/60 分钟} 可切换 K线
+4. **逐笔成交** — 买卖盘分布 + 分时价 + 分钟资金流向（主买/主卖）
+5. **公司基本面** — 财务指标多期趋势 + 股本结构 + F10 公司资料
+
+支持锚点直达：`/#kline`、`/#ticks` 等。
+
+---
+
 ## 测试
 
 ```bash
@@ -155,4 +252,4 @@ python -m pytest tests/ -q
 - `tests/test_indicators_*.py`：每个指标都用合成数据断言具体数值（MA5/RSI/KDJ/BOLL/ATR/量比 等）。
 - `tests/test_screener.py` / `test_screener_cli.py`：合成信号、缓存命中、坏票容错、CLI。
 - `tests/test_tdx_client_integration.py`：真实下载 `000001` 等，验证 ts_code / parquet 回读 / trade_time。
-
+- `tests/test_pytdx_extended_integration.py`：扩展接口（tick / 分时 / 股本结构 / F10 财务 / 指数 / 枚举）的实盘端到端测试。
