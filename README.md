@@ -3,13 +3,11 @@
 基于 **pytdx** 的 A 股数据管道：下载 → 落盘(parquet) → 计算技术指标 → 条件选股。
 仅依赖 pytdx，不接 tushare / baostock；复用 `scripts/data_pipeline/` 已有的多主机轮询连接层。
 
-> 设计与排除项见 [`PLAN.md`](./PLAN.md)。仅支持沪深主板 6 位代码（不做北交所）；单次下载失败即抛异常，批量选股按个股容错。
-
 ---
 
 ## 目录结构
 
-```
+```text
 scripts/data_pipeline/
 ├── tdx_client.py                 # 高层下载封装 TdxDownloader（全部下载入口）
 ├── connectors/
@@ -34,6 +32,14 @@ scripts/data_pipeline/
 └── screener/
     ├── conditions.py             # 金叉/突破/超卖 等声明式条件 + CONDITIONS
     └── run_screener.py           # screen() 批量入口 + 命令行
+
+scripts/tdx_mcp/                  # 通达信 MCP（HTTP/SSE 实时数据，与 pytdx 互补）
+├── tdx_client.py                 # 基础客户端 TdxMcpClient / TdxQueryResult
+├── tdx_stock_analyzer.py         # 个股四维诊断（行情/技术/财务/资金）
+├── tdx_market_daily.py           # 每日市场概览（7 板块并发）
+├── tdx_concept_board.py          # 概念板块成分股 / 热度 / 跨概念对比
+├── tdx_limit_up.py               # 涨停板 / 连板梯队 / 概念集中度
+└── tdx_data_enricher.py          # 批量增补 → data/tdx_*.json（概念/北向/机构/评级/筹码）
 ```
 
 ---
@@ -45,6 +51,8 @@ scripts/data_pipeline/
 ```bash
 pip install pytdx pandas pyarrow numpy
 ```
+
+> 第 5 节「通达信 MCP」的脚本走 HTTP，额外需要 `httpx`：`pip install httpx`。
 
 所有命令在项目根目录 `/Users/henrylin/trae_space/tdx_quant` 下运行。
 
@@ -236,6 +244,126 @@ python3 -m http.server 8765     # 任选端口本地预览
 5. **公司基本面** — 财务指标多期趋势 + 股本结构 + F10 公司资料
 
 支持锚点直达：`/#kline`、`/#ticks` 等。
+
+---
+
+## 5. 通达信 MCP（实时概念/资金/涨停数据）
+
+通达信 MCP（问小达，`https://mcp.tdx.com.cn:3001/mcp`）是 HTTP/SSE 自然语言数据接口，与上面的 **pytdx 历史管道互补**：
+
+| 数据维度 | pytdx（1~4 节） | 通达信 MCP（本节） |
+|----------|:---------------:|:------------------:|
+| K 线 / 分笔 / 财务快照 | ✅ 历史全量 | — |
+| 概念板块 / 板块成分股 | ❌ | ✅ 实时 |
+| 封单金额 / 封成比 / 涨停原因 | ❌ | ✅ 盘中 |
+| 主力 / 超大单资金流 | ❌ | ✅ 盘中 |
+| 北向资金 / 机构基金持仓 / 分析师评级 / 筹码分布 | ❌ | ✅ |
+
+> MCP 走 HTTP，需联网 + `TDX_API_KEY`；与 pytdx 二进制协议完全独立，互不依赖。
+
+### 环境准备
+
+```bash
+pip install httpx
+export TDX_API_KEY=TDX-your-api-key   # 必填
+```
+
+**密钥只从环境变量读取，仓库内不含任何硬编码 key**（审计已确认：6 个脚本一律 `os.getenv("TDX_API_KEY", "")`，文档里只有 `TDX-your-api-key` 等占位符）。传入方式：
+
+- 命令行脚本：`--api-key`（不传则回退到环境变量 `TDX_API_KEY`）
+- 直接调用：`TdxMcpClient(api_key=...)`（不传则读环境变量）
+
+三者皆空时构造即抛 `ValueError`，**不发任何请求**。
+
+| 安全约定 | 说明 |
+|----------|------|
+| 不入仓 | 真实 key 只放环境变量，代码/文档里无任何明文 |
+| `.mcp.json` 已 ignore | Claude Code 工具模式配置会带 key，`.gitignore` 已覆盖，勿提交 |
+| 失败快 | 缺 key 在构造期就报错，不会带空 header 去打 MCP |
+
+### 基础客户端：`TdxMcpClient`
+
+```python
+from scripts.tdx_mcp import TdxMcpClient
+
+client = TdxMcpClient()                      # 读环境变量 TDX_API_KEY
+result = client.query("人工智能概念板块成分股 今日涨跌幅", size=50)
+print(result.ok(), result.total)
+print(result.to_dicts())                     # list[dict]，字段名 → 值
+
+# 自动翻页（合并多页，最多 max_pages 页）
+result_all = client.query_all("DeepSeek概念板块成分股", page_size=50, max_pages=20)
+```
+
+- `question` 为自然语言；`range`：`AG`(A股,默认) / `HK-GP`(港股) / `JJ`(基金) / `ZS`(指数)。
+- 字段名常带日期后缀（如 `主力净流入(万元)\n2026.06.210#`），`to_dicts()` 后做子串模糊匹配（脚本里的 `_find_field`）。
+
+### 命令行脚本（均在 `scripts/tdx_mcp/`）
+
+项目惯例用 `-m` 运行（也支持 `python scripts/tdx_mcp/<name>.py` 直接跑）：
+
+| 脚本 | 用途 | 常用参数 |
+|------|------|----------|
+| `tdx_stock_analyzer.py` | 个股四维诊断（行情/技术/财务/资金） | `600519 [--json]` |
+| `tdx_concept_board.py` | 概念成分股 / 个股概念 / 多概念对比 | `--concept "DeepSeek"` / `--stock 600519` / `--compare A B C` |
+| `tdx_limit_up.py` | 今日涨停 / 连板梯队 / 概念集中度 | `--min-boards 2` / `--by-concept` / `--ladder` |
+| `tdx_market_daily.py` | 每日市场概览（7 板块并发） | `--section breadth/capital/sectors` |
+| `tdx_data_enricher.py` | 批量增补概念/北向/机构/评级/筹码 | `--all` / `--concepts` / `--ratings --codes ...` |
+
+```bash
+python -m scripts.tdx_mcp.tdx_stock_analyzer 600519
+python -m scripts.tdx_mcp.tdx_concept_board --concept "人形机器人" --all
+python -m scripts.tdx_mcp.tdx_limit_up --min-boards 2 --ladder
+python -m scripts.tdx_mcp.tdx_market_daily --json
+```
+
+### `tdx_data_enricher.py` — 离线数据增补
+
+把 MCP 批量数据写入 `data/`（与 parquet 同目录，JSON 格式），供离线分析：
+
+```bash
+python -m scripts.tdx_mcp.tdx_data_enricher --dry-run      # 预览字段清单
+python -m scripts.tdx_mcp.tdx_data_enricher --concepts     # 全市场概念标签
+python -m scripts.tdx_mcp.tdx_data_enricher --ratings --codes 600519,300750
+python -m scripts.tdx_mcp.tdx_data_enricher --all
+```
+
+| 输出文件 | 内容 |
+|----------|------|
+| `data/tdx_concepts.json` | 全市场个股概念标签（最多 47 个/只） |
+| `data/tdx_north_money.json` | 今日陆股通活跃股净买量/成交额 |
+| `data/tdx_inst_holdings.json` | 机构/基金持仓比例、家数 |
+| `data/tdx_analyst_ratings.json` | 分析师评级、目标价、预测 EPS |
+| `data/tdx_chip_enhanced.json` | 筹码集中度、获利比例、平均成本 |
+
+> `--ratings` / `--chip` 不传 `--codes` 时，默认从 `data/daily/ts_code=*/` 分区取股票池（本项目无流通市值列，按 ts_code 排序取前 `--max-stocks` 只）。
+
+### Claude Code MCP 工具模式（让 AI 直接查）
+
+项目根创建 `.mcp.json`（**已加入 `.gitignore`**，勿提交 key）：
+
+```json
+{
+  "mcpServers": {
+    "tdx": {
+      "type": "http",
+      "url": "https://mcp.tdx.com.cn:3001/mcp",
+      "headers": { "tdx-api-key": "TDX-your-api-key" }
+    }
+  }
+}
+```
+
+`~/.claude/settings.json` 启用 `{"enableAllProjectMcpServers": true}`，重启 Claude Code 后 `claude mcp list` 应见 `tdx: ✔ Connected`。
+
+### 限制
+
+| 限制 | 说明 |
+|------|------|
+| 单次单品种 | 每次 `tdx_wenda_quotes` 只查 1 只股票或 1 个板块 |
+| 资金流盘后为空 | `主力净流入` 等收盘后可能为空 |
+| 北向非全量 | 仅当日陆股通活跃前 ~20~50 只 |
+| 无 L2 行情 | 不支持逐笔成交、五档盘口 |
 
 ---
 
