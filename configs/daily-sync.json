@@ -1,0 +1,21 @@
+{
+  "data_root": "data",
+  "universe": "all-a-shares",
+  "symbols": [],
+  "max_symbols": null,
+  "history_bars": 800,
+  "refresh_bars": 30,
+  "workers": 4,
+  "retries": 2,
+  "indices": [
+    {
+      "code": "000001",
+      "market": 1
+    },
+    {
+      "code": "399001",
+      "market": 0
+    }
+  ],
+  "report": "data/daily-sync-report.json"
+}

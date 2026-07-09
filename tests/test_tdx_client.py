@@ -192,6 +192,29 @@ def test_download_daily_max_bars_truncates(fake_api: FakeHqApi, tmp_path: Path) 
     assert len(df) == 50
 
 
+def test_update_daily_merges_recent_tail_without_losing_old_history(
+    fake_api: FakeHqApi, tmp_path: Path
+) -> None:
+    fake_api.bars_for[(9, 0, '000001')] = [
+        _bar(2024, 1, 3),
+        _bar(2024, 1, 2),
+        _bar(2024, 1, 1),
+    ]
+    downloader = TdxDownloader(data_root=tmp_path)
+    downloader.download_daily('000001')
+
+    updated_latest = _bar(2024, 1, 3)
+    updated_latest['close'] = 11.5
+    fake_api.bars_for[(9, 0, '000001')] = [
+        _bar(2024, 1, 4),
+        updated_latest,
+    ]
+    result = downloader.update_daily('000001', history_bars=800, refresh_bars=30)
+
+    assert result['trade_date'].tolist() == ['20240101', '20240102', '20240103', '20240104']
+    assert result.loc[result['trade_date'] == '20240103', 'close'].iloc[0] == 11.5
+
+
 # ---------------------------------------------------------------------------
 # download_minute
 # ---------------------------------------------------------------------------

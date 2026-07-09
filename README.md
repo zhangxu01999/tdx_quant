@@ -76,6 +76,34 @@ snap    = dl.snapshot("000001")                # 实时快照(hq); snapshot("AAP
 - `download_daily/minute/xdxr` 仅支持沪深主板；非主板代码直接 `ValueError`。
 - 拉空 / 连接失败 → 直接 raise，不返回空表。
 
+### 股票池批量下载与每日增量更新
+
+编辑 `configs/daily-sync.json`，然后运行：
+
+```bash
+python -m scripts.data_pipeline.batch_daily --config configs/daily-sync.json
+```
+
+首次下载每只股票最近 `history_bars` 根日线；后续运行只重新获取最近 `refresh_bars` 根，
+与本地历史合并并按时间去重。任务支持并发、逐股重试、断点续跑和 JSON 结果报告，单只股票失败
+不会覆盖其他股票的数据。PyCharm 可直接运行 `tdx-quant：股票池日线同步`。
+
+当前默认 `universe` 为 `all-a-shares`，会从 `data/security_list` 快照中解析全部沪深 A 股。
+如果只是小批量调试，可改回 `configured` 并手写 `symbols`，或保留全市场模式但设置
+`max_symbols` 限制数量：
+
+```json
+{
+  "universe": "all-a-shares",
+  "symbols": [],
+  "max_symbols": 100
+}
+```
+
+确认网络和磁盘无误后，把 `max_symbols` 改为 `null` 或删除该字段即可同步证券列表中的全部沪深 A 股。
+`all-a-shares` 依赖已经下载的 `data/security_list` 快照；证券列表存在不等于日线已经落盘，
+回测端只会扫描 `data/daily/ts_code=*/` 中实际下载成功的股票。
+
 ### 扩展接口（均在原 4 个接口之外补充）
 
 除上面的 `daily / minute / xdxr / snapshot`，`TdxDownloader` 另封装了 6 类接口（**均仅支持沪深主板 6 位代码**，非主板直接 `ValueError`）：
@@ -364,6 +392,48 @@ python -m scripts.tdx_mcp.tdx_data_enricher --all
 | 资金流盘后为空 | `主力净流入` 等收盘后可能为空 |
 | 北向非全量 | 仅当日陆股通活跃前 ~20~50 只 |
 | 无 L2 行情 | 不支持逐笔成交、五档盘口 |
+
+---
+
+## 6. DuckDB 全市场查询层
+
+全市场历史行情继续按 `ts_code` 分区保存为 Parquet，DuckDB 直接扫描文件，不需要把
+5000 多只股票重复导入另一套数据库，也不会生成全市场巨型 JSON。安装项目依赖：
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+命令行可以检查数据覆盖、搜索股票或查询一只股票的指定区间：
+
+```bash
+# 统计每个 Parquet 数据域的行数和证券数
+python -m scripts.data_pipeline.query.duckdb_store --data-root data summary
+
+# 从最新证券快照搜索沪深 A 股
+python -m scripts.data_pipeline.query.duckdb_store --data-root data \
+  symbols --search 茅台 --market SH --limit 20
+
+# 查询单股日线；只返回指定上限内最近的数据，最终按时间升序排列
+python -m scripts.data_pipeline.query.duckdb_store --data-root data \
+  bars 600519.SH --timeframe daily --start 2025-01-01 --end 2026-07-08 --limit 500
+```
+
+Python 服务层可以直接复用同一个接口：
+
+```python
+from scripts.data_pipeline.query import DuckDBMarketStore
+
+with DuckDBMarketStore("data") as store:
+    stocks = store.list_symbols(search="银行", limit=50)
+    bars = store.query_bars("000001", start="2026-01-01", limit=300)
+    latest = store.latest_bars(symbols=["000001", "600519"])
+```
+
+- `query_bars` 支持 `daily / 5m / 15m / 30m / 60m / index`，按证券与日期裁剪。
+- `latest_bars` 使用窗口函数一次取得股票池每只证券的最新 K 线，适合选股预筛。
+- `list_symbols` 默认过滤指数、基金、债券和 B 股，只返回沪深 A 股。
+- 所有查询均参数化并限制最大返回行数；浏览器后续只需请求当前股票，不读取全市场文件。
 
 ---
 

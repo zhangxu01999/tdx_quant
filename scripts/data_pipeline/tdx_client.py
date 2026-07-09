@@ -112,11 +112,13 @@ class TdxDownloader:
     # ------------------------------------------------------------------
     # download: daily
     # ------------------------------------------------------------------
-    def download_daily(self, code: str, *, max_bars: int | None = None) -> pd.DataFrame:
+    def fetch_daily(self, code: str, *, max_bars: int | None = None) -> pd.DataFrame:
+        """Fetch and normalize daily bars without touching the local cache."""
+
         market, channel = self._resolve_market(code)
         if channel != 'hq':
             raise ValueError(
-                f'download_daily only supports mainland 6-digit codes; '
+                f'fetch_daily only supports mainland 6-digit codes; '
                 f'{code!r} resolves to channel {channel!r} (historical bars unavailable).'
             )
 
@@ -133,9 +135,57 @@ class TdxDownloader:
         if not payload:
             raise ValueError(f'No daily bars returned for code {code!r} (invalid code?)')
 
-        df = self._normalize_bars(payload, int(market), code)
+        return self._normalize_bars(payload, int(market), code)
+
+    def download_daily(self, code: str, *, max_bars: int | None = None) -> pd.DataFrame:
+        """Download daily history and replace the symbol's local Parquet."""
+
+        df = self.fetch_daily(code, max_bars=max_bars)
         write_by_symbol(self.data_root, 'daily', df)
         return df
+
+    def update_daily(
+        self,
+        code: str,
+        *,
+        history_bars: int = 800,
+        refresh_bars: int = 30,
+    ) -> pd.DataFrame:
+        """Incrementally refresh one symbol while preserving older local bars.
+
+        A cold symbol downloads ``history_bars`` rows. An existing symbol only
+        fetches the latest ``refresh_bars`` rows, merges them with local history,
+        de-duplicates by timestamp and then replaces its one Parquet file.
+        Re-fetching a short tail also corrects the latest unfinished bar.
+        """
+
+        if history_bars <= 0 or refresh_bars <= 0:
+            raise ValueError('history_bars and refresh_bars must be positive')
+        market, channel = self._resolve_market(code)
+        if channel != 'hq':
+            raise ValueError(
+                f'update_daily only supports mainland 6-digit codes; '
+                f'{code!r} resolves to channel {channel!r}.'
+            )
+        from scripts.data_pipeline.code_mapping import market_code_to_ts_code
+
+        ts_code = market_code_to_ts_code(int(market), code)
+        cache_path = self.data_root / 'daily' / f'ts_code={ts_code}' / 'data.parquet'
+        existing = pd.DataFrame()
+        if cache_path.exists():
+            existing = pd.read_parquet(cache_path)
+            existing['ts_code'] = ts_code
+
+        recent = self.fetch_daily(
+            code,
+            max_bars=refresh_bars if not existing.empty else history_bars,
+        )
+        combined = pd.concat([existing, recent], ignore_index=True, sort=False)
+        combined['datetime'] = pd.to_datetime(combined['datetime'])
+        combined = combined.sort_values('datetime', ascending=True)
+        combined = combined.drop_duplicates(subset=['datetime'], keep='last').reset_index(drop=True)
+        write_by_symbol(self.data_root, 'daily', combined)
+        return combined
 
     # ------------------------------------------------------------------
     # download: minute
