@@ -28,6 +28,7 @@ ALLOWED_DOMAINS = {
     "finance_capital",
     "minute_time",
     "security_list",
+    "short_term_daily",
     "tdx_transactions",
     "xdxr",
 }

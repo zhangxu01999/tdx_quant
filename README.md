@@ -104,6 +104,29 @@ python -m scripts.data_pipeline.batch_daily --config configs/daily-sync.json
 `all-a-shares` 依赖已经下载的 `data/security_list` 快照；证券列表存在不等于日线已经落盘，
 回测端只会扫描 `data/daily/ts_code=*/` 中实际下载成功的股票。
 
+### 短线日频增强特征
+
+短线策略除了 OHLCV，还需要成交额、换手率、流通市值、涨跌停和炸板等字段。日线同步完成后运行：
+
+```bash
+python -m scripts.data_pipeline.short_term_features --data-root data
+```
+
+脚本会读取：
+
+- `data/daily`：价格、成交量、成交额；
+- `data/finance_capital`：流通股本，若某只股票暂缺该数据，则换手率和流通市值为空。
+
+并生成：
+
+```text
+data/short_term_daily/ts_code=<股票代码>/data.parquet
+```
+
+当前输出字段包括 `amount`、`turnover_rate`、`float_market_cap`、`limit_up`、`limit_down`、
+`hit_limit_up`、`hit_limit_down`、`bomb_limit_up`、`volume_ratio` 和 `amount_growth`。涨跌停状态先按
+主板 10%、创业板/科创板 20%、北交所 30% 从 OHLC 推导；ST、复牌首日和新股等特殊规则后续再接更精确数据源。
+
 ### 扩展接口（均在原 4 个接口之外补充）
 
 除上面的 `daily / minute / xdxr / snapshot`，`TdxDownloader` 另封装了 6 类接口（**均仅支持沪深主板 6 位代码**，非主板直接 `ValueError`）：
@@ -147,6 +170,7 @@ cap   = dl.download_finance_capital("000001")      # 股本结构快照(单行)
 | `download_company_finance` | `company_finance` | `ts_code=<...>/data.parquet`（+ 原文 `company_info_raw/`） |
 | `download_finance_capital` | `finance_capital` | `ts_code=<...>/data.parquet` |
 | `download_security_list` | `security_list` | `market=<SZ\|SH>/date=<YYYYMMDD>/`（每日快照） |
+| `short_term_features` | `short_term_daily` | `ts_code=<...>/data.parquet`（从日线和股本结构派生） |
 
 `ts_code` / `date` / `market` 等分区键只存在路径里（文件内不重复存），读时由 hive 分区还原，`pd.read_parquet('data/daily')` 即可一次读回该 domain 下全部股票。`download_tick` / `download_minute_time` / `download_finance_capital` / `download_company_finance` 返回时会把这些键重新挂回 DataFrame 列上。
 

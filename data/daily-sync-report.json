@@ -1,0 +1,153 @@
+{
+  "requested": 13,
+  "succeeded": 13,
+  "failed": 0,
+  "stocks": [
+    {
+      "code": "000001",
+      "ts_code": "000001.SZ",
+      "status": "updated",
+      "rows_before": 300,
+      "rows_after": 300,
+      "rows_added": 0,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    },
+    {
+      "code": "000333",
+      "ts_code": "000333.SZ",
+      "status": "updated",
+      "rows_before": 800,
+      "rows_after": 800,
+      "rows_added": 0,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    },
+    {
+      "code": "000651",
+      "ts_code": "000651.SZ",
+      "status": "updated",
+      "rows_before": 800,
+      "rows_after": 800,
+      "rows_added": 0,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    },
+    {
+      "code": "002415",
+      "ts_code": "002415.SZ",
+      "status": "updated",
+      "rows_before": 800,
+      "rows_after": 800,
+      "rows_added": 0,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    },
+    {
+      "code": "002594",
+      "ts_code": "002594.SZ",
+      "status": "updated",
+      "rows_before": 800,
+      "rows_after": 800,
+      "rows_added": 0,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    },
+    {
+      "code": "300059",
+      "ts_code": "300059.SZ",
+      "status": "updated",
+      "rows_before": 800,
+      "rows_after": 800,
+      "rows_added": 0,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    },
+    {
+      "code": "300750",
+      "ts_code": "300750.SZ",
+      "status": "updated",
+      "rows_before": 800,
+      "rows_after": 800,
+      "rows_added": 0,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    },
+    {
+      "code": "600000",
+      "ts_code": "600000.SH",
+      "status": "updated",
+      "rows_before": 800,
+      "rows_after": 800,
+      "rows_added": 0,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    },
+    {
+      "code": "600372",
+      "ts_code": "600372.SH",
+      "status": "downloaded",
+      "rows_before": 0,
+      "rows_after": 800,
+      "rows_added": 800,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    },
+    {
+      "code": "600519",
+      "ts_code": "600519.SH",
+      "status": "updated",
+      "rows_before": 800,
+      "rows_after": 800,
+      "rows_added": 0,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    },
+    {
+      "code": "600522",
+      "ts_code": "600522.SH",
+      "status": "updated",
+      "rows_before": 800,
+      "rows_after": 800,
+      "rows_added": 0,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    },
+    {
+      "code": "601318",
+      "ts_code": "601318.SH",
+      "status": "updated",
+      "rows_before": 800,
+      "rows_after": 800,
+      "rows_added": 0,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    },
+    {
+      "code": "603601",
+      "ts_code": "603601.SH",
+      "status": "updated",
+      "rows_before": 800,
+      "rows_after": 800,
+      "rows_added": 0,
+      "latest_trade_date": "20260708",
+      "attempts": 1
+    }
+  ],
+  "indices": [
+    {
+      "code": "000001",
+      "market": 1,
+      "status": "updated",
+      "rows": 800,
+      "latest_trade_date": "20260708"
+    },
+    {
+      "code": "399001",
+      "market": 0,
+      "status": "updated",
+      "rows": 800,
+      "latest_trade_date": "20260708"
+    }
+  ]
+}
