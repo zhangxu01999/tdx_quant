@@ -13,6 +13,8 @@ const AXIS = { axisLine: { lineStyle: { color: C.grid } }, axisLabel: { color: C
 const charts = {};
 const rendered = new Set();
 let DATA = {};
+let searchTimer = null;
+let searchRequest = 0;
 
 /* ---------- helpers ---------- */
 function $(id) { return document.getElementById(id); }
@@ -52,6 +54,106 @@ async function load() {
   DATA.kline = out[1];
 }
 
+async function apiJson(path) {
+  const response = await fetch(path, { cache: 'no-store' });
+  let payload = {};
+  try { payload = await response.json(); } catch (_) { /* 返回统一可读错误 */ }
+  if (!response.ok) throw new Error(payload.error || `${response.status} ${response.statusText}`);
+  return payload;
+}
+
+/* ---------- searchable stock picker ---------- */
+function initStockSearch() {
+  const input = $('stock-search');
+  const results = $('stock-results');
+  const button = $('stock-search-button');
+
+  const requestSearch = () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => searchStocks(input.value.trim()), 180);
+  };
+  input.addEventListener('input', requestSearch);
+  input.addEventListener('focus', () => searchStocks(input.value.trim()));
+  input.addEventListener('keydown', event => {
+    const options = [...results.querySelectorAll('.stock-result')];
+    if (event.key === 'Enter') {
+      const selected = options.find(option => option.classList.contains('active')) || options[0];
+      if (selected) selected.click();
+      else searchStocks(input.value.trim(), true);
+      event.preventDefault();
+      return;
+    }
+    if (!options.length) return;
+    let index = options.findIndex(option => option.classList.contains('active'));
+    if (event.key === 'ArrowDown') index = Math.min(index + 1, options.length - 1);
+    else if (event.key === 'ArrowUp') index = Math.max(index - 1, 0);
+    else if (event.key === 'Escape') { results.classList.remove('open'); return; }
+    else return;
+    options.forEach((option, i) => option.classList.toggle('active', i === index));
+    options[index].scrollIntoView({ block: 'nearest' });
+    event.preventDefault();
+  });
+  document.addEventListener('click', event => {
+    if (!$('stock-picker').contains(event.target)) results.classList.remove('open');
+  });
+  button.addEventListener('click', () => searchStocks(input.value.trim(), true));
+}
+
+async function searchStocks(query, selectFirst = false) {
+  const serial = ++searchRequest;
+  const results = $('stock-results');
+  const input = $('stock-search');
+  const button = $('stock-search-button');
+  input.setAttribute('aria-expanded', 'true');
+  button.disabled = selectFirst;
+  $('stock-query-status').textContent = '搜索中…';
+  try {
+    const data = await apiJson(`/api/symbols?q=${encodeURIComponent(query)}&limit=40`);
+    if (serial !== searchRequest) return;
+    results.innerHTML = data.items.length
+      ? data.items.map(item => `<button class="stock-result" type="button" role="option"
+          data-symbol="${item.ts_code}" data-name="${item.name}">
+          <span class="stock-name">${item.name}</span><span class="stock-code">${item.ts_code}</span>
+        </button>`).join('')
+      : '<div class="stock-empty">没有找到匹配股票</div>';
+    results.querySelectorAll('.stock-result').forEach(button => {
+      button.addEventListener('click', () => selectStock(button.dataset.symbol, button.dataset.name));
+    });
+    const options = [...results.querySelectorAll('.stock-result')];
+    if (options[0]) options[0].classList.add('active');
+    results.classList.add('open');
+    $('stock-query-status').textContent = data.items.length ? `${data.items.length} 条` : '';
+    if (selectFirst && options.length) {
+      const rawCode = (query.match(/\d{6}/) || [])[0];
+      const exact = options.find(option => option.dataset.symbol.startsWith(rawCode || ''));
+      (exact || options[0]).click();
+    }
+  } catch (error) {
+    results.innerHTML = `<div class="stock-empty">搜索失败：${error.message}</div>`;
+    results.classList.add('open');
+    $('stock-query-status').textContent = '';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function selectStock(symbol, name) {
+  $('stock-search').value = `${name} · ${symbol}`;
+  $('stock-results').classList.remove('open');
+  $('stock-search').setAttribute('aria-expanded', 'false');
+  $('stock-query-status').textContent = '加载行情…';
+  try {
+    DATA.kline = await apiJson(`/api/stocks/${encodeURIComponent(symbol)}?limit=800`);
+    rendered.delete('kline');
+    location.hash = 'kline';
+    activate('kline');
+    $('stock-query-status').textContent = `更新至 ${DATA.kline.latest.trade_date}`;
+  } catch (error) {
+    $('stock-query-status').textContent = '加载失败';
+    alert(`${symbol} 数据加载失败：${error.message}`);
+  }
+}
+
 /* ---------- overview ---------- */
 function renderOverview() {
   const d = DATA.overview;
@@ -60,7 +162,7 @@ function renderOverview() {
   const asof = sh.points.length ? sh.points[sh.points.length - 1].trade_date : '—';
 
   $('topbar-stats').innerHTML = [
-    statCard('数据基准日', asof, 'amber'),
+    statCard('指数数据日', asof, 'amber'),
     statCard('证券总数', fmtBig(d.universe.total || 0), ''),
     statCard('沪市 SH', fmtBig(d.universe.SH || 0), ''),
     statCard('深市 SZ', fmtBig(d.universe.SZ || 0), ''),
@@ -119,8 +221,20 @@ function renderKline() {
   const histCls = L.macd_hist >= 0 ? 'up' : 'down';
   const rsiCls = L.rsi6 == null ? '' : (L.rsi6 < 30 ? 'down' : L.rsi6 > 70 ? 'up' : '');
   $('kline-title').textContent = `${d.name} (${d.ts_code}) · 日线 ${d.bars} 根`;
+  const changeCls = L.change_pct == null ? '' : (L.change_pct >= 0 ? 'up' : 'down');
+  const turnoverText = L.turnover_rate == null ? '—' : `${fmtNum(L.turnover_rate * 100)}%`;
+  ['ch-kline', 'ch-macd', 'ch-rsi', 'ch-kdj'].forEach(id => { if (charts[id]) charts[id].clear(); });
+  if (!$('stock-search').value) $('stock-search').value = `${d.name} · ${d.ts_code}`;
+  $('topbar-stats').innerHTML = [
+    statCard('行情日期', L.trade_date || '—', 'amber'),
+    statCard('当前股票', d.ts_code, ''),
+    statCard('最新价', fmtNum(L.close), changeCls),
+    statCard('日涨跌', L.change_pct == null ? '—' : `${L.change_pct >= 0 ? '+' : ''}${fmtNum(L.change_pct)}%`, changeCls),
+  ].join('');
   $('kline-cards').innerHTML = [
-    `<div class="card"><div class="label">最新收盘</div><div class="value">${fmtNum(L.close)}</div><div class="sub muted">末交易日</div></div>`,
+    `<div class="card"><div class="label">最新收盘 · ${L.trade_date || '末交易日'}</div><div class="value ${changeCls}">${fmtNum(L.close)}</div><div class="sub ${changeCls}">${L.change_pct == null ? '—' : `${L.change_pct >= 0 ? '+' : ''}${fmtNum(L.change_pct)}%`}</div></div>`,
+    `<div class="card"><div class="label">成交额 / 换手率</div><div class="value" style="font-size:20px">${fmtBig(L.amount)} · ${turnoverText}</div><div class="sub muted">成交活跃度</div></div>`,
+    `<div class="card"><div class="label">流通市值 / 量比</div><div class="value" style="font-size:20px">${fmtBig(L.float_market_cap)} · ${fmtNum(L.volume_ratio)}</div><div class="sub muted">股本快照 ${L.capital_updated_date || '缺失'}</div></div>`,
     `<div class="card"><div class="label">MA5 / MA10 / MA20</div><div class="value" style="font-size:20px">${fmtNum(L.ma5)} · ${fmtNum(L.ma10)} · ${fmtNum(L.ma20)}</div><div class="sub muted">均线粘合度</div></div>`,
     `<div class="card"><div class="label">RSI6</div><div class="value ${rsiCls}">${fmtNum(L.rsi6)}</div><div class="sub muted">${L.rsi6 != null && L.rsi6 < 30 ? '超卖区' : L.rsi6 > 70 ? '超买区' : '中性区'}</div></div>`,
     `<div class="card"><div class="label">MACD 柱</div><div class="value ${histCls}">${fmtNum(L.macd_hist, 4)}</div><div class="sub muted">${histCls === 'up' ? '多头' : '空头'}动能</div></div>`,
@@ -394,9 +508,15 @@ window.addEventListener('resize', () => Object.values(charts).forEach(c => c && 
     $('footer-meta').textContent = 'error';
     return;
   }
+  try {
+    DATA.kline = await apiJson('/api/stocks/000001.SZ?limit=800');
+  } catch (_) {
+    // 新接口暂不可用时保留旧快照，其他页面仍可浏览。
+  }
+  initStockSearch();
   document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => { location.hash = t.dataset.tab; }));
   window.addEventListener('hashchange', () => { const t = location.hash.replace('#', ''); if (RENDERS[t]) activate(t); });
   const fromHash = location.hash.replace('#', '');
   activate(RENDERS[fromHash] ? fromHash : 'overview');
-  $('footer-meta').textContent = '渲染完成 · 5 个数据域';
+  $('footer-meta').textContent = '终端就绪 · 输入代码或名称查询';
 })();

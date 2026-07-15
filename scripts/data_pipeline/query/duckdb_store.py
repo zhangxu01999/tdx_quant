@@ -198,8 +198,13 @@ class DuckDBMarketStore:
             filters.append("market = ?")
             parameters.append(normalized_market)
         if search:
-            filters.append("(code ILIKE ? OR name ILIKE ?)")
-            pattern = f"%{search.strip()}%"
+            # 通达信证券名称中可能夹有半角/全角空格，例如“万 科Ａ”。
+            # 搜索时同时去掉这些空格，使用户输入“万科”也能正常命中。
+            filters.append(
+                "(code ILIKE ? OR replace(replace(name, ' ', ''), '　', '') ILIKE ?)"
+            )
+            compact_search = search.strip().replace(" ", "").replace("　", "")
+            pattern = f"%{compact_search}%"
             parameters.extend([pattern, pattern])
         where = "WHERE " + " AND ".join(filters) if filters else ""
         parameters.append(row_limit)

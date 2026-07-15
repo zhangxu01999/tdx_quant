@@ -1,0 +1,10 @@
+{
+  "data_root": "data",
+  "universe": "all-a-shares",
+  "symbols": [],
+  "max_symbols": null,
+  "workers": 4,
+  "retries": 2,
+  "skip_existing": false,
+  "report": "data/finance-capital-sync-report.json"
+}

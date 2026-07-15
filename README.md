@@ -109,6 +109,15 @@ python -m scripts.data_pipeline.batch_daily --config configs/daily-sync.json
 短线策略除了 OHLCV，还需要成交额、换手率、流通市值、涨跌停和炸板等字段。日线同步完成后运行：
 
 ```bash
+python -m scripts.data_pipeline.batch_finance_capital --config configs/finance-capital-sync.json
+```
+
+该任务会从 `data/security_list` 解析全市场 A 股，逐只下载 pytdx HQ 的股本结构快照并写入
+`data/finance_capital`。PyCharm 可直接运行 `tdx-quant：全市场股本结构同步`。
+
+随后生成短线增强特征：
+
+```bash
 python -m scripts.data_pipeline.short_term_features --data-root data
 ```
 
@@ -252,17 +261,21 @@ python -m scripts.data_pipeline.screener.run_screener \
 
 ## 4. 前端可视化：`frontend/`（A股量化数据终端）
 
-把 `data/` 下的 parquet 导出为 JSON，用纯静态页面 + ECharts 离线渲染（无需后端服务）。
+数据终端默认通过本地只读 API 按需查询 DuckDB/Parquet。K线主图工具栏可按股票代码或名称搜索，
+选择股票后只加载该股票最近的日线，动态计算 MA、BOLL、MACD、RSI、KDJ，并合并
+成交额、换手率、流通市值和股本快照，不会把全市场行情导出为一个巨型 JSON。
 
 ```bash
-cd frontend
-python3 data_export.py          # 读 data/*.parquet -> assets/*.json
-python3 -m http.server 8765     # 任选端口本地预览
+python -m frontend.server --data-root data --port 8765 --bind 127.0.0.1
 # 浏览器打开 http://127.0.0.1:8765/
 ```
 
-- **数据导出**：`data_export.py` 读取 `data/` 下全部域，写出 5 个 JSON（`overview / kline_daily / minute / ticks / fundamentals`）。重新下载数据后重跑即可刷新。
-- **页面**：`index.html` + `app.js` + `styles.css`；ECharts 已 vendor 在 `assets/echarts.min.js`，**完全离线、无 CDN 依赖**。
+- PyCharm 可直接运行 `tdx-quant：启动数据终端`，启动项已经切换到上述动态服务。
+- `/api/symbols?q=银行`：按代码或名称搜索证券；兼容通达信名称中的半角/全角空格。
+- `/api/stocks/600372.SH?limit=800`：按需返回单股行情、技术指标和短线字段。
+- `data_export.py` 与旧的 5 个 JSON 暂时保留，为市场概览、分钟、逐笔和基本面旧页面提供
+  离线快照；K 线主图已支持搜索后动态替换。
+- 页面仍使用本地 ECharts，无 CDN 依赖；服务只监听 `127.0.0.1`，不对外网开放。
 
 ### 视图 ↔ 数据来源
 
@@ -276,7 +289,8 @@ python3 -m http.server 8765     # 任选端口本地预览
 | 4. 逐笔成交 | `ticks.json` | `tdx_transactions`（`download_tick`）+ `minute_time`（`download_minute_time`） |
 | 5. 公司基本面 | `fundamentals.json` | `company_finance`（`download_company_finance`）+ `finance_capital`（`download_finance_capital`）+ `company_info_raw` |
 
-> K 线主图需要一份**预计算指标**文件 `data/000001.SZ_indicators.parquet`（日 K 叠加全部指标列）。它由 `compute_all` 生成，不在下载流程里，需手动产出一次：
+> 旧的初始 K 线快照仍读取 `data/000001.SZ_indicators.parquet`。通过顶部搜索框选择股票后，
+> 服务会直接读取对应日线并即时计算指标，不再要求提前为每只股票生成指标文件。若要刷新旧快照可运行：
 >
 > ```bash
 > python3 -c "
