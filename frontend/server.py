@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,6 +19,7 @@ from scripts.data_pipeline.query import DuckDBMarketStore
 
 
 FRONTEND_ROOT = Path(__file__).resolve().parent
+CANONICAL_SYMBOL = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 
 
 def _number(value: Any) -> float | int | None:
@@ -38,19 +40,36 @@ def _series(frame: pd.DataFrame, column: str) -> list[float | int | None]:
     return [_number(value) for value in frame[column].tolist()]
 
 
+def _canonical_symbol(symbol: str) -> str:
+    value = symbol.strip().upper()
+    if not CANONICAL_SYMBOL.fullmatch(value):
+        raise ValueError(f"invalid mainland symbol: {symbol!r}")
+    return value
+
+
 class MarketTerminalService:
     """封装终端需要的搜索与单股详情，避免前端直接读取巨型 JSON。"""
 
     def __init__(self, data_root: str | Path = "data") -> None:
         self.data_root = Path(data_root).expanduser().resolve()
 
-    def search_symbols(self, query: str = "", *, limit: int = 30) -> dict[str, object]:
+    def search_symbols(
+        self,
+        query: str = "",
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, object]:
         """按代码或名称搜索证券列表；返回结果很小，适合下拉框即时查询。"""
 
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
+        if not 0 <= offset <= 100_000:
+            raise ValueError("offset must be between 0 and 100000")
         with DuckDBMarketStore(self.data_root) as store:
-            frame = store.list_symbols(search=query or None, limit=limit)
+            frame = store.list_symbols(search=query or None, limit=limit + 1, offset=offset)
+        has_more = len(frame) > limit
+        frame = frame.iloc[:limit]
         items = [
             {
                 "code": str(row.code),
@@ -60,13 +79,24 @@ class MarketTerminalService:
             }
             for row in frame.itertuples(index=False)
         ]
-        return {"query": query, "count": len(items), "items": items}
+        return {
+            "query": query,
+            "offset": offset,
+            "count": len(items),
+            "has_more": has_more,
+            "items": items,
+        }
 
     def _partition(self, domain: str, symbol: str) -> pd.DataFrame:
-        path = self.data_root / domain / f"ts_code={symbol}" / "data.parquet"
-        if not path.exists():
+        domain_root = self.data_root / domain
+        direct = domain_root / f"ts_code={symbol}" / "data.parquet"
+        paths = [direct] if direct.exists() else sorted(
+            domain_root.rglob(f"ts_code={symbol}/data.parquet")
+        )
+        if not paths:
             return pd.DataFrame()
-        return pd.read_parquet(path)
+        frames = [pd.read_parquet(path) for path in paths]
+        return pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
 
     def _symbol_name(self, symbol: str) -> str:
         code = symbol.split(".", 1)[0]
@@ -78,6 +108,47 @@ class MarketTerminalService:
             if item["ts_code"] == symbol:
                 return str(item["name"])
         return symbol
+
+    def market_overview(self, *, limit: int = 240) -> dict[str, object]:
+        """返回沪深指数、市场宽度与当前 A 股证券数量。"""
+
+        if not 20 <= limit <= 2_000:
+            raise ValueError("limit must be between 20 and 2000")
+        definitions = (("000001.SH", "上证指数"), ("399001.SZ", "深证成指"))
+        indices: list[dict[str, object]] = []
+        with DuckDBMarketStore(self.data_root) as store:
+            for symbol, name in definitions:
+                frame = store.query_bars(symbol, timeframe="index", limit=limit)
+                if frame.empty:
+                    continue
+                frame = frame.sort_values("datetime")
+                indices.append(
+                    {
+                        "ts_code": symbol,
+                        "name": name,
+                        "points": [
+                            {
+                                "trade_date": str(row.trade_date),
+                                "close": _number(row.close),
+                                "up_count": _number(getattr(row, "up_count", None)),
+                                "down_count": _number(getattr(row, "down_count", None)),
+                            }
+                            for row in frame.itertuples(index=False)
+                        ],
+                    }
+                )
+            symbols = store.list_symbols(limit=6_000)
+        if len(indices) < 2:
+            raise FileNotFoundError("沪深指数数据尚未同步完整")
+        markets = symbols["market"].astype(str).value_counts().to_dict()
+        return {
+            "indices": indices,
+            "universe": {
+                "total": int(len(symbols)),
+                "SH": int(markets.get("SH", 0)),
+                "SZ": int(markets.get("SZ", 0)),
+            },
+        }
 
     def stock_detail(self, symbol: str, *, limit: int = 800) -> dict[str, object]:
         """查询一只股票的日线并即时计算指标，再合并短线及股本快照。"""
@@ -187,6 +258,148 @@ class MarketTerminalService:
             },
         }
 
+    def minute_detail(self, symbol: str, *, limit: int = 800) -> dict[str, object]:
+        """按股票返回本地已同步的 5/15/30/60 分钟 K 线。"""
+
+        if not 20 <= limit <= 2_000:
+            raise ValueError("limit must be between 20 and 2000")
+        data: dict[str, dict[str, object]] = {}
+        canonical = _canonical_symbol(symbol)
+        with DuckDBMarketStore(self.data_root) as store:
+            for timeframe in ("5m", "15m", "30m", "60m"):
+                try:
+                    frame = store.query_bars(symbol, timeframe=timeframe, limit=limit)
+                except FileNotFoundError:
+                    continue
+                if frame.empty:
+                    continue
+                frame = frame.sort_values("datetime").reset_index(drop=True)
+                canonical = str(frame["ts_code"].iloc[-1])
+                data[timeframe] = {
+                    "dates": pd.to_datetime(frame["datetime"]).dt.strftime("%m-%d %H:%M").tolist(),
+                    "ohlc": [
+                        [_number(row.open), _number(row.close), _number(row.low), _number(row.high)]
+                        for row in frame.itertuples(index=False)
+                    ],
+                    "vol": _series(frame, "vol"),
+                    "amount": _series(frame, "amount"),
+                }
+        if not data:
+            raise FileNotFoundError(f"no minute bars found for {symbol}")
+        return {
+            "ts_code": canonical,
+            "name": self._symbol_name(canonical),
+            "timeframes": list(data),
+            "data": data,
+        }
+
+    def ticks_detail(self, symbol: str) -> dict[str, object]:
+        """按股票返回逐笔买卖分布、分钟资金流和分时成交价。"""
+
+        canonical = _canonical_symbol(symbol)
+        transactions = self._partition("tdx_transactions", canonical)
+        if transactions.empty:
+            raise FileNotFoundError(f"no transaction data found for {symbol}")
+        transactions = transactions.copy()
+        transactions["trade_date"] = transactions["trade_date"].astype(str)
+
+        def minute_index(value: Any) -> int:
+            digits = "".join(character for character in str(value) if character.isdigit())[:4]
+            if len(digits) < 4:
+                return 0
+            hour, minute = divmod(int(digits), 100)
+            if hour >= 13:
+                return max(0, min(239, 120 + (hour - 13) * 60 + minute))
+            return max(0, min(239, (hour - 9) * 60 + minute - 30))
+
+        transactions["minute_idx"] = transactions["time"].map(minute_index)
+        labels = transactions.get("buyorsell_label", pd.Series(index=transactions.index, dtype=object))
+        transactions["side"] = labels.fillna("other").astype(str).str.lower().map(
+            lambda value: value if value in {"buy", "sell"} else "other"
+        )
+        flow = [
+            {
+                "minute": int(index),
+                "buy_vol": _number(group.loc[group["side"] == "buy", "vol"].sum()),
+                "sell_vol": _number(group.loc[group["side"] == "sell", "vol"].sum()),
+            }
+            for index, group in transactions.groupby("minute_idx")
+        ]
+        distribution = (
+            transactions["side"]
+            .value_counts()
+            .reindex(["buy", "sell", "neutral", "other"])
+            .fillna(0)
+            .astype(int)
+            .to_dict()
+        )
+        minute_time = self._partition("minute_time", canonical)
+        price_curve: list[dict[str, object]] = []
+        if not minute_time.empty:
+            minute_time = minute_time.sort_values("minute_idx")
+            price_curve = [
+                {
+                    "minute": int(row.minute_idx),
+                    "price": _number(row.price),
+                    "vol": _number(row.vol),
+                }
+                for row in minute_time.itertuples(index=False)
+            ]
+        prices = pd.to_numeric(transactions["price"], errors="coerce").dropna()
+        if prices.empty:
+            raise FileNotFoundError(f"transaction prices missing for {symbol}")
+        return {
+            "ts_code": canonical,
+            "name": self._symbol_name(canonical),
+            "date": str(transactions["trade_date"].iloc[-1]),
+            "n_ticks": int(len(transactions)),
+            "distribution": distribution,
+            "price_range": [_number(prices.min()), _number(prices.max())],
+            "flow": flow,
+            "price_curve": price_curve,
+        }
+
+    def fundamentals_detail(self, symbol: str) -> dict[str, object]:
+        """按股票返回财务指标、股本结构和 F10 文本。"""
+
+        canonical = _canonical_symbol(symbol)
+        finance = self._partition("company_finance", canonical)
+        if finance.empty:
+            raise FileNotFoundError(f"no fundamentals found for {symbol}")
+        periods = sorted(finance["period"].dropna().astype(str).unique().tolist())
+        metrics: dict[str, dict[str, float | int | None]] = {}
+        for metric, group in finance.groupby("metric"):
+            values = {
+                str(row.period): _number(row.value_num)
+                for row in group.itertuples(index=False)
+            }
+            if any(value is not None for value in values.values()):
+                metrics[str(metric)] = values
+
+        capital_frame = self._partition("finance_capital", canonical)
+        capital: dict[str, object] = {}
+        if not capital_frame.empty:
+            row = capital_frame.iloc[-1]
+            capital = {
+                "zongguben": _number(row.get("zongguben")),
+                "liutongguben": _number(row.get("liutongguben")),
+                "ipo_date": str(row.get("ipo_date", "")),
+                "industry_code": str(row.get("industry", "")),
+                "province_code": str(row.get("province", "")),
+            }
+        information = self._partition("company_info_raw", canonical)
+        company_text = ""
+        if not information.empty and "text" in information.columns:
+            company_text = "\n\n".join(information["text"].dropna().astype(str).tolist())[:3_000]
+        return {
+            "ts_code": canonical,
+            "name": self._symbol_name(canonical),
+            "periods": periods,
+            "metrics": metrics,
+            "capital": capital,
+            "company_info": company_text,
+        }
+
 
 class TerminalRequestHandler(SimpleHTTPRequestHandler):
     """同一端口同时提供网页文件和只读数据 API。"""
@@ -222,17 +435,34 @@ class TerminalRequestHandler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/health":
                 self._send_json({"status": "ok", "data_root": str(self.service.data_root)})
                 return
+            if parsed.path == "/api/market/overview":
+                params = parse_qs(parsed.query)
+                limit = int(params.get("limit", ["240"])[0])
+                self._send_json(self.service.market_overview(limit=limit))
+                return
             if parsed.path == "/api/symbols":
                 params = parse_qs(parsed.query)
                 query = params.get("q", [""])[0]
-                limit = int(params.get("limit", ["30"])[0])
-                self._send_json(self.service.search_symbols(query, limit=limit))
+                limit = int(params.get("limit", ["100"])[0])
+                offset = int(params.get("offset", ["0"])[0])
+                self._send_json(self.service.search_symbols(query, limit=limit, offset=offset))
                 return
             if parsed.path.startswith("/api/stocks/"):
-                symbol = unquote(parsed.path.removeprefix("/api/stocks/"))
+                remainder = unquote(parsed.path.removeprefix("/api/stocks/")).strip("/")
+                symbol, separator, resource = remainder.partition("/")
                 params = parse_qs(parsed.query)
-                limit = int(params.get("limit", ["800"])[0])
-                self._send_json(self.service.stock_detail(symbol, limit=limit))
+                if separator and resource == "minute":
+                    limit = int(params.get("limit", ["800"])[0])
+                    self._send_json(self.service.minute_detail(symbol, limit=limit))
+                elif separator and resource == "ticks":
+                    self._send_json(self.service.ticks_detail(symbol))
+                elif separator and resource == "fundamentals":
+                    self._send_json(self.service.fundamentals_detail(symbol))
+                elif not separator:
+                    limit = int(params.get("limit", ["800"])[0])
+                    self._send_json(self.service.stock_detail(symbol, limit=limit))
+                else:
+                    raise FileNotFoundError(f"unknown stock resource: {resource}")
                 return
         except (ValueError, FileNotFoundError) as exc:
             status = HTTPStatus.NOT_FOUND if isinstance(exc, FileNotFoundError) else HTTPStatus.BAD_REQUEST

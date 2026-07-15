@@ -261,36 +261,42 @@ python -m scripts.data_pipeline.screener.run_screener \
 
 ## 4. 前端可视化：`frontend/`（A股量化数据终端）
 
-数据终端默认通过本地只读 API 按需查询 DuckDB/Parquet。K线主图工具栏可按股票代码或名称搜索，
-选择股票后只加载该股票最近的日线，动态计算 MA、BOLL、MACD、RSI、KDJ，并合并
-成交额、换手率、流通市值和股本快照，不会把全市场行情导出为一个巨型 JSON。
+数据终端默认通过本地只读 API 按需查询 DuckDB/Parquet。页面顶部的全局股票选择器支持按代码
+或名称搜索；选择股票后，日 K、多周期分钟线、逐笔成交和公司基本面同步切换。日线会动态计算
+MA、BOLL、MACD、RSI、KDJ，并合并成交额、换手率、流通市值和股本快照。
 
 ```bash
 python -m frontend.server --data-root data --port 8765 --bind 127.0.0.1
 # 浏览器打开 http://127.0.0.1:8765/
 ```
 
+股票选择器采用分页懒加载，每页读取 100 只，滚动到下拉框底部会自动加载下一页，因此可遍历
+证券快照内的全部股票；仍可直接输入六位代码或名称进行精确搜索。
+
 - PyCharm 可直接运行 `tdx-quant：启动数据终端`，启动项已经切换到上述动态服务。
 - `/api/symbols?q=银行`：按代码或名称搜索证券；兼容通达信名称中的半角/全角空格。
+- `/api/market/overview?limit=240`：返回沪深指数、涨跌家数和最新证券数量。
 - `/api/stocks/600372.SH?limit=800`：按需返回单股行情、技术指标和短线字段。
-- `data_export.py` 与旧的 5 个 JSON 暂时保留，为市场概览、分钟、逐笔和基本面旧页面提供
-  离线快照；K 线主图已支持搜索后动态替换。
+- `/api/stocks/000001.SZ/minute`、`ticks`、`fundamentals`：按当前股票返回分钟、逐笔和基本面。
+- `data_export.py` 与旧的 5 个 JSON 仅保留为离线快照工具，动态终端不再依赖它们。
 - 页面仍使用本地 ECharts，无 CDN 依赖；服务只监听 `127.0.0.1`，不对外网开放。
+- 某只股票尚未同步分钟、逐笔或基本面时，对应页面会明确提示并清除旧股票内容，不伪造数据。
 
 ### 视图 ↔ 数据来源
 
 每个视图消费的数据域（对应上面的下载接口）：
 
-| 视图 | JSON | 消费数据域（下载接口） |
-|------|------|------------------------|
-| 1. 市场概览 | `overview.json` | `index_daily`（`download_index`）+ `security_list`（`download_security_list`） |
-| 2. K 线主图 | `kline_daily.json` | `data/000001.SZ_indicators.parquet`（见下方说明） |
-| 3. 多周期分时 | `minute.json` | `minute_5m/15m/30m/60m`（`download_minute`） |
-| 4. 逐笔成交 | `ticks.json` | `tdx_transactions`（`download_tick`）+ `minute_time`（`download_minute_time`） |
-| 5. 公司基本面 | `fundamentals.json` | `company_finance`（`download_company_finance`）+ `finance_capital`（`download_finance_capital`）+ `company_info_raw` |
+| 视图 | 动态接口 | 消费数据域（下载接口） |
+|------|----------|------------------------|
+| 1. 市场概览 | `/api/market/overview` | `index_daily`（`download_index`）+ `security_list`（`download_security_list`） |
+| 2. K 线主图 | `/api/stocks/{代码}` | `daily` + `short_term_daily` + `finance_capital` |
+| 3. 多周期分时 | `/api/stocks/{代码}/minute` | `minute_5m/15m/30m/60m`（`download_minute`） |
+| 4. 逐笔成交 | `/api/stocks/{代码}/ticks` | `tdx_transactions`（`download_tick`）+ `minute_time`（`download_minute_time`） |
+| 5. 公司基本面 | `/api/stocks/{代码}/fundamentals` | `company_finance`（`download_company_finance`）+ `finance_capital`（`download_finance_capital`）+ `company_info_raw` |
 
-> 旧的初始 K 线快照仍读取 `data/000001.SZ_indicators.parquet`。通过顶部搜索框选择股票后，
-> 服务会直接读取对应日线并即时计算指标，不再要求提前为每只股票生成指标文件。若要刷新旧快照可运行：
+> 仅在手工运行旧版 `data_export.py` 离线快照工具时，K 线快照才读取
+> `data/000001.SZ_indicators.parquet`。动态数据终端会直接读取对应日线并即时计算指标，
+> 不要求提前为每只股票生成指标文件。若要刷新旧快照可运行：
 >
 > ```bash
 > python3 -c "

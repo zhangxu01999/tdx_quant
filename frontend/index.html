@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>A股量化数据终端 · Quant Terminal</title>
+<link rel="icon" href="data:," />
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -26,6 +27,33 @@
   <button class="tab" data-tab="fundamentals">公司基本面</button>
 </nav>
 
+<div class="market-toolbar global-market-toolbar">
+  <div class="market-toolbar-title">
+    <strong>全局股票联动</strong>
+    <span>在这里选择股票，K线、分钟、逐笔和基本面同步切换</span>
+  </div>
+  <div class="stock-query-group" id="stock-picker">
+    <div class="stock-picker">
+      <div class="stock-search-wrap">
+        <input
+          id="stock-search"
+          type="search"
+          autocomplete="off"
+          placeholder="输入代码或名称，例如 600372 / 中航机载"
+          aria-label="按股票代码或名称搜索"
+          aria-autocomplete="list"
+          aria-controls="stock-results"
+          aria-expanded="false"
+        />
+        <span class="stock-search-icon">⌕</span>
+      </div>
+      <div class="stock-results" id="stock-results" role="listbox"></div>
+    </div>
+    <button class="stock-search-button" id="stock-search-button" type="button">联动查询</button>
+    <div class="stock-query-status" id="stock-query-status"></div>
+  </div>
+</div>
+
 <main class="content">
 
   <!-- 概览 -->
@@ -39,32 +67,6 @@
 
   <!-- K线主图 -->
   <section class="panel" data-panel="kline">
-    <div class="market-toolbar">
-      <div class="market-toolbar-title">
-        <strong>股票行情</strong>
-        <span>从本地全市场日线中按代码或名称查询</span>
-      </div>
-      <div class="stock-query-group" id="stock-picker">
-        <div class="stock-picker">
-          <div class="stock-search-wrap">
-            <input
-              id="stock-search"
-              type="search"
-              autocomplete="off"
-              placeholder="输入代码或名称，例如 600372 / 中航机载"
-              aria-label="按股票代码或名称搜索"
-              aria-autocomplete="list"
-              aria-controls="stock-results"
-              aria-expanded="false"
-            />
-            <span class="stock-search-icon">⌕</span>
-          </div>
-          <div class="stock-results" id="stock-results" role="listbox"></div>
-        </div>
-        <button class="stock-search-button" id="stock-search-button" type="button">查询</button>
-        <div class="stock-query-status" id="stock-query-status"></div>
-      </div>
-    </div>
     <div class="card-row" id="kline-cards"></div>
     <div class="chart-box tall"><h3 id="kline-title">日线 K线 + 均线 + 布林带 + 成交量</h3><div id="ch-kline" class="chart"></div></div>
     <div class="grid-2">
@@ -77,9 +79,7 @@
   <!-- 多周期分时 -->
   <section class="panel" data-panel="minute">
     <div class="controls">
-      <label>股票
-        <select id="min-sym"></select>
-      </label>
+      <span>联动股票：<strong id="min-symbol-label">—</strong></span>
       <label>周期
         <select id="min-tf"></select>
       </label>

@@ -46,6 +46,9 @@ body {
   background: var(--bg-box); border: 1px solid var(--border); border-radius: 12px;
   box-shadow: var(--shadow);
 }
+.global-market-toolbar {
+  max-width: 1456px; margin: 16px auto 0; border-color: rgba(240,185,11,.28);
+}
 .market-toolbar-title { min-width: 170px; }
 .market-toolbar-title strong { display: block; font-size: 15px; }
 .market-toolbar-title span { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
@@ -120,6 +123,7 @@ body {
 .content { padding: 18px 22px 40px; max-width: 1500px; margin: 0 auto; }
 .panel { display: none; animation: fade .2s ease; }
 .panel.active { display: block; }
+.panel.data-missing > :not(.data-unavailable) { display: none; }
 @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
 
 /* layout helpers */

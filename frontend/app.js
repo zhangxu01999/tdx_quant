@@ -1,5 +1,5 @@
 /* app.js — A股量化数据终端
- * Loads exported JSON (frontend/assets/*.json) and renders ECharts panels.
+ * Loads every stock panel from the local API and keeps one global selected symbol.
  * Chinese market convention: 涨=红(#ff4d6d) / 跌=绿(#00d68f).
  */
 'use strict';
@@ -15,6 +15,7 @@ const rendered = new Set();
 let DATA = {};
 let searchTimer = null;
 let searchRequest = 0;
+let stockSearchState = { query: '', offset: 0, hasMore: false, loading: false };
 
 /* ---------- helpers ---------- */
 function $(id) { return document.getElementById(id); }
@@ -27,6 +28,14 @@ function fmtBig(n) {
   return (+n).toLocaleString();
 }
 function fmtNum(n, d = 2) { return (n == null || isNaN(n)) ? '—' : (+n).toFixed(d); }
+function fmtDate(value) {
+  const text = String(value || '');
+  return /^\d{8}$/.test(text) ? `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6)}` : (text || '—');
+}
+function shortDate(value) {
+  const text = String(value || '');
+  return /^\d{8}$/.test(text) ? `${text.slice(4, 6)}-${text.slice(6)}` : text;
+}
 function pct(now, prev) { return prev ? ((now - prev) / prev) * 100 : null; }
 function minuteLabel(i) {
   // i: 0..239, 0=09:30, lunch break 11:30..13:00
@@ -43,15 +52,8 @@ function chart(id) {
 
 /* ---------- load ---------- */
 async function load() {
-  const files = ['overview', 'kline_daily', 'minute', 'ticks', 'fundamentals'];
-  const out = await Promise.all(files.map(f =>
-    fetch('assets/' + f + '.json', { cache: 'no-store' }).then(r => {
-      if (!r.ok) throw new Error(r.status + ' ' + f);
-      return r.json();
-    })
-  ));
-  files.forEach((f, i) => DATA[f.replace('_daily', '')] = out[i]);
-  DATA.kline = out[1];
+  DATA.overview = await apiJson('/api/market/overview?limit=240');
+  await loadStockWorkspace('000001.SZ');
 }
 
 async function apiJson(path) {
@@ -60,6 +62,33 @@ async function apiJson(path) {
   try { payload = await response.json(); } catch (_) { /* 返回统一可读错误 */ }
   if (!response.ok) throw new Error(payload.error || `${response.status} ${response.statusText}`);
   return payload;
+}
+
+async function loadStockWorkspace(symbol) {
+  const encoded = encodeURIComponent(symbol);
+  const kline = await apiJson(`/api/stocks/${encoded}?limit=800`);
+  const resources = ['minute', 'ticks', 'fundamentals'];
+  const results = await Promise.allSettled(
+    resources.map(resource => apiJson(`/api/stocks/${encoded}/${resource}`))
+  );
+  DATA.kline = kline;
+  DATA.selected = { ts_code: kline.ts_code, name: kline.name };
+  DATA.availability = {};
+  resources.forEach((resource, index) => {
+    const result = results[index];
+    DATA[resource] = result.status === 'fulfilled' ? result.value : null;
+    DATA.availability[resource] = result.status === 'fulfilled';
+  });
+  rendered.clear();
+}
+
+function stockAvailabilityText() {
+  const available = DATA.availability || {};
+  return [
+    `分钟${available.minute ? '✓' : '未同步'}`,
+    `逐笔${available.ticks ? '✓' : '未同步'}`,
+    `基本面${available.fundamentals ? '✓' : '未同步'}`,
+  ].join(' · ');
 }
 
 /* ---------- searchable stock picker ---------- */
@@ -73,10 +102,14 @@ function initStockSearch() {
     searchTimer = setTimeout(() => searchStocks(input.value.trim()), 180);
   };
   input.addEventListener('input', requestSearch);
-  input.addEventListener('focus', () => searchStocks(input.value.trim()));
+  input.addEventListener('focus', () => {
+    const query = input.value.includes('·') ? '' : input.value.trim();
+    searchStocks(query);
+  });
   input.addEventListener('keydown', event => {
     const options = [...results.querySelectorAll('.stock-result')];
     if (event.key === 'Enter') {
+      clearTimeout(searchTimer);
       const selected = options.find(option => option.classList.contains('active')) || options[0];
       if (selected) selected.click();
       else searchStocks(input.value.trim(), true);
@@ -94,37 +127,61 @@ function initStockSearch() {
     event.preventDefault();
   });
   document.addEventListener('click', event => {
-    if (!$('stock-picker').contains(event.target)) results.classList.remove('open');
+    if (!$('stock-picker').contains(event.target)) {
+      results.classList.remove('open');
+      if (DATA.kline) $('stock-query-status').textContent = `${DATA.kline.latest.trade_date} · ${stockAvailabilityText()}`;
+    }
   });
-  button.addEventListener('click', () => searchStocks(input.value.trim(), true));
+  results.addEventListener('click', event => {
+    const option = event.target.closest('.stock-result');
+    if (option) selectStock(option.dataset.symbol, option.dataset.name);
+  });
+  results.addEventListener('scroll', () => {
+    const nearBottom = results.scrollTop + results.clientHeight >= results.scrollHeight - 80;
+    if (nearBottom) searchStocks(stockSearchState.query, false, true);
+  });
+  button.addEventListener('click', () => {
+    clearTimeout(searchTimer);
+    const selectedCode = input.value.includes('·') ? (input.value.match(/\d{6}/) || [''])[0] : input.value.trim();
+    searchStocks(selectedCode, true);
+  });
 }
 
-async function searchStocks(query, selectFirst = false) {
-  const serial = ++searchRequest;
+async function searchStocks(query, selectFirst = false, append = false) {
   const results = $('stock-results');
   const input = $('stock-search');
   const button = $('stock-search-button');
+  const normalized = query.trim();
+  if (append && (stockSearchState.loading || !stockSearchState.hasMore)) return;
+  if (!append) {
+    searchRequest += 1;
+    stockSearchState = { query: normalized, offset: 0, hasMore: false, loading: false };
+  }
+  const serial = searchRequest;
+  const offset = append ? stockSearchState.offset : 0;
+  stockSearchState.loading = true;
   input.setAttribute('aria-expanded', 'true');
   button.disabled = selectFirst;
-  $('stock-query-status').textContent = '搜索中…';
+  $('stock-query-status').textContent = append ? `继续加载第 ${offset + 1} 条…` : '搜索中…';
   try {
-    const data = await apiJson(`/api/symbols?q=${encodeURIComponent(query)}&limit=40`);
-    if (serial !== searchRequest) return;
-    results.innerHTML = data.items.length
-      ? data.items.map(item => `<button class="stock-result" type="button" role="option"
+    const data = await apiJson(`/api/symbols?q=${encodeURIComponent(normalized)}&limit=100&offset=${offset}`);
+    if (serial !== searchRequest || normalized !== stockSearchState.query) return;
+    const markup = data.items.map(item => `<button class="stock-result" type="button" role="option"
           data-symbol="${item.ts_code}" data-name="${item.name}">
           <span class="stock-name">${item.name}</span><span class="stock-code">${item.ts_code}</span>
-        </button>`).join('')
-      : '<div class="stock-empty">没有找到匹配股票</div>';
-    results.querySelectorAll('.stock-result').forEach(button => {
-      button.addEventListener('click', () => selectStock(button.dataset.symbol, button.dataset.name));
-    });
+        </button>`).join('');
+    if (append) results.insertAdjacentHTML('beforeend', markup);
+    else results.innerHTML = markup || '<div class="stock-empty">没有找到匹配股票</div>';
+    stockSearchState.offset = offset + data.items.length;
+    stockSearchState.hasMore = Boolean(data.has_more);
     const options = [...results.querySelectorAll('.stock-result')];
-    if (options[0]) options[0].classList.add('active');
+    if (!append && options[0]) options[0].classList.add('active');
     results.classList.add('open');
-    $('stock-query-status').textContent = data.items.length ? `${data.items.length} 条` : '';
-    if (selectFirst && options.length) {
-      const rawCode = (query.match(/\d{6}/) || [])[0];
+    $('stock-query-status').textContent = data.items.length
+      ? `已加载 ${stockSearchState.offset} 条${stockSearchState.hasMore ? ' · 下拉继续' : ''}`
+      : (append ? `共 ${stockSearchState.offset} 条` : '');
+    if (selectFirst && !append && options.length) {
+      const rawCode = (normalized.match(/\d{6}/) || [])[0];
       const exact = options.find(option => option.dataset.symbol.startsWith(rawCode || ''));
       (exact || options[0]).click();
     }
@@ -133,21 +190,25 @@ async function searchStocks(query, selectFirst = false) {
     results.classList.add('open');
     $('stock-query-status').textContent = '';
   } finally {
-    button.disabled = false;
+    if (serial === searchRequest) {
+      stockSearchState.loading = false;
+      button.disabled = false;
+    }
   }
 }
 
 async function selectStock(symbol, name) {
-  $('stock-search').value = `${name} · ${symbol}`;
+  clearTimeout(searchTimer);
+  searchRequest += 1;
   $('stock-results').classList.remove('open');
   $('stock-search').setAttribute('aria-expanded', 'false');
-  $('stock-query-status').textContent = '加载行情…';
+  $('stock-query-status').textContent = '正在联动全部页面…';
   try {
-    DATA.kline = await apiJson(`/api/stocks/${encodeURIComponent(symbol)}?limit=800`);
-    rendered.delete('kline');
-    location.hash = 'kline';
-    activate('kline');
-    $('stock-query-status').textContent = `更新至 ${DATA.kline.latest.trade_date}`;
+    await loadStockWorkspace(symbol);
+    $('stock-search').value = `${DATA.kline.name || name} · ${DATA.kline.ts_code}`;
+    const active = document.querySelector('.panel.active')?.dataset.panel || 'kline';
+    activate(active);
+    $('stock-query-status').textContent = `${DATA.kline.latest.trade_date} · ${stockAvailabilityText()}`;
   } catch (error) {
     $('stock-query-status').textContent = '加载失败';
     alert(`${symbol} 数据加载失败：${error.message}`);
@@ -159,7 +220,7 @@ function renderOverview() {
   const d = DATA.overview;
   const sh = d.indices.find(x => x.ts_code.endsWith('.SH')) || d.indices[0];
   const sz = d.indices.find(x => x.ts_code.endsWith('.SZ')) || d.indices[1];
-  const asof = sh.points.length ? sh.points[sh.points.length - 1].trade_date : '—';
+  const asof = sh.points.length ? fmtDate(sh.points[sh.points.length - 1].trade_date) : '—';
 
   $('topbar-stats').innerHTML = [
     statCard('指数数据日', asof, 'amber'),
@@ -183,7 +244,7 @@ function renderOverview() {
   $('index-cards').innerHTML = idxCard(sh) + idxCard(sz);
 
   // breadth diverging bar (上证)
-  const dates = sh.points.map(p => p.trade_date.slice(4));
+  const dates = sh.points.map(p => shortDate(p.trade_date));
   chart('ch-breadth').setOption({
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: { data: ['上涨家数', '下跌家数'], textStyle: { color: C.text }, top: 0 },
@@ -197,12 +258,11 @@ function renderOverview() {
   });
 
   // index dual-line
-  const xsz = sz.points.map(p => p.trade_date.slice(4));
   chart('ch-index-line').setOption({
     tooltip: { trigger: 'axis' },
     legend: { data: [sh.name, sz.name], textStyle: { color: C.text }, top: 0 },
     grid: { left: 50, right: 60, top: 36, bottom: 28 },
-    xAxis: { type: 'category', data: sh.points.map(p => p.trade_date.slice(4)), ...AXIS },
+    xAxis: { type: 'category', data: sh.points.map(p => shortDate(p.trade_date)), ...AXIS },
     yAxis: [
       { type: 'value', scale: true, name: sh.name, nameTextStyle: { color: C.muted }, ...AXIS },
       { type: 'value', scale: true, name: sz.name, nameTextStyle: { color: C.muted }, ...AXIS },
@@ -215,6 +275,18 @@ function renderOverview() {
 }
 
 /* ---------- kline ---------- */
+function renderSelectedStockHeader() {
+  const d = DATA.kline;
+  const L = d.latest || {};
+  const changeCls = L.change_pct == null ? '' : (L.change_pct >= 0 ? 'up' : 'down');
+  $('topbar-stats').innerHTML = [
+    statCard('行情日期', L.trade_date || '—', 'amber'),
+    statCard('当前股票', d.ts_code, ''),
+    statCard('最新价', fmtNum(L.close), changeCls),
+    statCard('日涨跌', L.change_pct == null ? '—' : `${L.change_pct >= 0 ? '+' : ''}${fmtNum(L.change_pct)}%`, changeCls),
+  ].join('');
+}
+
 function renderKline() {
   const d = DATA.kline;
   const L = d.latest || {};
@@ -225,12 +297,7 @@ function renderKline() {
   const turnoverText = L.turnover_rate == null ? '—' : `${fmtNum(L.turnover_rate * 100)}%`;
   ['ch-kline', 'ch-macd', 'ch-rsi', 'ch-kdj'].forEach(id => { if (charts[id]) charts[id].clear(); });
   if (!$('stock-search').value) $('stock-search').value = `${d.name} · ${d.ts_code}`;
-  $('topbar-stats').innerHTML = [
-    statCard('行情日期', L.trade_date || '—', 'amber'),
-    statCard('当前股票', d.ts_code, ''),
-    statCard('最新价', fmtNum(L.close), changeCls),
-    statCard('日涨跌', L.change_pct == null ? '—' : `${L.change_pct >= 0 ? '+' : ''}${fmtNum(L.change_pct)}%`, changeCls),
-  ].join('');
+  renderSelectedStockHeader();
   $('kline-cards').innerHTML = [
     `<div class="card"><div class="label">最新收盘 · ${L.trade_date || '末交易日'}</div><div class="value ${changeCls}">${fmtNum(L.close)}</div><div class="sub ${changeCls}">${L.change_pct == null ? '—' : `${L.change_pct >= 0 ? '+' : ''}${fmtNum(L.change_pct)}%`}</div></div>`,
     `<div class="card"><div class="label">成交额 / 换手率</div><div class="value" style="font-size:20px">${fmtBig(L.amount)} · ${turnoverText}</div><div class="sub muted">成交活跃度</div></div>`,
@@ -328,24 +395,27 @@ function renderKline() {
 /* ---------- minute ---------- */
 function renderMinute() {
   const d = DATA.minute;
-  if (!$('min-sym').dataset.bound) {
-    $('min-sym').dataset.bound = '1';
-    d.symbols.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = `${d.names[s]} (${s})`; $('min-sym').appendChild(o); });
+  renderSelectedStockHeader();
+  $('min-symbol-label').textContent = `${d.name} (${d.ts_code})`;
+  if ($('min-tf').dataset.symbol !== d.ts_code) {
+    $('min-tf').dataset.symbol = d.ts_code;
+    $('min-tf').innerHTML = '';
     d.timeframes.forEach(t => { const o = document.createElement('option'); o.value = t; o.textContent = t + '分钟'; $('min-tf').appendChild(o); });
-    $('min-sym').addEventListener('change', drawMinute);
-    $('min-tf').addEventListener('change', drawMinute);
+    if (!$('min-tf').dataset.bound) {
+      $('min-tf').dataset.bound = '1';
+      $('min-tf').addEventListener('change', drawMinute);
+    }
   }
   drawMinute();
 }
 function drawMinute() {
   const d = DATA.minute;
-  const sym = $('min-sym').value || d.symbols[0];
   const tf = $('min-tf').value || d.timeframes[0];
-  const seg = d.data[sym] && d.data[sym][tf];
+  const seg = d.data[tf];
   if (!seg) return;
   const n = seg.dates.length;
   const volColors = seg.ohlc.map(o => o[1] >= o[0] ? C.up : C.down);
-  $('min-title').textContent = `${d.names[sym]} (${sym}) · ${tf} 分钟线 · ${n} 根`;
+  $('min-title').textContent = `${d.name} (${d.ts_code}) · ${tf} 分钟线 · ${n} 根`;
   $('min-meta').textContent = `${n} 根 K 线 · ${seg.dates[0]} → ${seg.dates[n - 1]}`;
   chart('ch-minute').setOption({
     tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
@@ -372,6 +442,8 @@ function drawMinute() {
 /* ---------- ticks ---------- */
 function renderTicks() {
   const d = DATA.ticks;
+  renderSelectedStockHeader();
+  ['ch-tick-dist', 'ch-tick-price', 'ch-tick-flow'].forEach(id => { if (charts[id]) charts[id].clear(); });
   $('tick-cards').innerHTML = [
     `<div class="card"><div class="label">${d.name} (${d.ts_code})</div><div class="value" style="font-size:20px">${d.date}</div><div class="sub muted">逐笔交易日</div></div>`,
     `<div class="card"><div class="label">成交笔数</div><div class="value">${d.n_ticks.toLocaleString()}</div><div class="sub muted">当日逐笔</div></div>`,
@@ -427,6 +499,7 @@ function renderTicks() {
 /* ---------- fundamentals ---------- */
 function renderFundamentals() {
   const d = DATA.fundamentals;
+  renderSelectedStockHeader();
   const np = d.metrics['净利润(元)'] || {};
   const eps = d.metrics['基本每股收益(元)'] || {};
   const lastPeriod = d.periods[d.periods.length - 1];
@@ -438,13 +511,17 @@ function renderFundamentals() {
     `<div class="card"><div class="label">最新净利润 (${lastPeriod})</div><div class="value" style="font-size:20px">${fmtBig(np[lastPeriod])}</div><div class="sub muted">EPS ${fmtNum(eps[lastPeriod])} 元</div></div>`,
   ].join('');
 
-  if (!$('fund-metric').dataset.bound) {
-    $('fund-metric').dataset.bound = '1';
+  if ($('fund-metric').dataset.symbol !== d.ts_code) {
+    $('fund-metric').dataset.symbol = d.ts_code;
+    $('fund-metric').innerHTML = '';
     Object.keys(d.metrics).forEach(m => { const o = document.createElement('option'); o.value = m; o.textContent = m; $('fund-metric').appendChild(o); });
     // prefer a meaningful default
     const pref = ['基本每股收益(元)', '净利润(元)', '加权净资产收益率(%)', '营业总收入(元)'].find(m => d.metrics[m]);
     if (pref) $('fund-metric').value = pref;
-    $('fund-metric').addEventListener('change', drawFund);
+    if (!$('fund-metric').dataset.bound) {
+      $('fund-metric').dataset.bound = '1';
+      $('fund-metric').addEventListener('change', drawFund);
+    }
   }
   drawFund();
 
@@ -485,13 +562,33 @@ function statCard(k, v, cls) {
 
 /* ---------- tab wiring ---------- */
 const RENDERS = { overview: renderOverview, kline: renderKline, minute: renderMinute, ticks: renderTicks, fundamentals: renderFundamentals };
+function showUnavailable(tab) {
+  const panel = document.querySelector(`[data-panel="${tab}"]`);
+  panel.classList.add('data-missing');
+  let notice = panel.querySelector('.data-unavailable');
+  const stock = DATA.selected || { ts_code: '当前股票', name: '' };
+  const labels = { minute: '分钟线', ticks: '逐笔成交', fundamentals: '公司基本面' };
+  if (!notice) {
+    notice = el('chart-box data-unavailable', '');
+    panel.prepend(notice);
+  }
+  notice.innerHTML = `<h3>${stock.name} (${stock.ts_code}) 的${labels[tab] || '页面数据'}尚未同步</h3>
+    <p class="muted">全局股票已经切换，当前页面不会继续显示上一只股票。请先同步该数据域后再查看。</p>`;
+  notice.hidden = false;
+  if (tab !== 'overview' && DATA.kline) renderSelectedStockHeader();
+}
 function activate(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.dataset.panel === tab));
   // resize existing then render
   requestAnimationFrame(() => {
     const fn = RENDERS[tab];
-    if (fn) fn();
+    const available = tab === 'kline' || Boolean(DATA[tab]);
+    const notice = document.querySelector(`[data-panel="${tab}"] .data-unavailable`);
+    if (notice) notice.hidden = available;
+    if (available) document.querySelector(`[data-panel="${tab}"]`).classList.remove('data-missing');
+    if (fn && available) fn();
+    else showUnavailable(tab);
     Object.keys(charts).forEach(id => { if ($(id) && charts[id]) charts[id].resize(); });
     rendered.add(tab);
   });
@@ -504,19 +601,24 @@ window.addEventListener('resize', () => Object.values(charts).forEach(c => c && 
   try {
     await load();
   } catch (e) {
-    document.querySelector('.content').innerHTML = `<div class="chart-box"><h3>数据加载失败</h3><pre class="f10">${e}\n\n请先在 frontend/ 下运行: python3 data_export.py</pre></div>`;
+    document.querySelector('.content').innerHTML = `<div class="chart-box"><h3>数据加载失败</h3><pre class="f10">${e}\n\n请检查 data 目录是否包含日线 Parquet，并确认本地 API 可以访问。</pre></div>`;
     $('footer-meta').textContent = 'error';
     return;
   }
-  try {
-    DATA.kline = await apiJson('/api/stocks/000001.SZ?limit=800');
-  } catch (_) {
-    // 新接口暂不可用时保留旧快照，其他页面仍可浏览。
-  }
   initStockSearch();
-  document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => { location.hash = t.dataset.tab; }));
-  window.addEventListener('hashchange', () => { const t = location.hash.replace('#', ''); if (RENDERS[t]) activate(t); });
+  $('stock-search').value = `${DATA.kline.name} · ${DATA.kline.ts_code}`;
+  $('stock-query-status').textContent = `${DATA.kline.latest.trade_date} · ${stockAvailabilityText()}`;
+  const supportedTabs = new Set(Object.keys(RENDERS));
+  document.querySelectorAll('.tab').forEach(t => {
+    t.hidden = false;
+    t.addEventListener('click', () => { location.hash = t.dataset.tab; });
+  });
+  window.addEventListener('hashchange', () => {
+    const t = location.hash.replace('#', '');
+    activate(supportedTabs.has(t) ? t : 'kline');
+  });
   const fromHash = location.hash.replace('#', '');
-  activate(RENDERS[fromHash] ? fromHash : 'overview');
+  const defaultTab = 'overview';
+  activate(supportedTabs.has(fromHash) && (fromHash === 'kline' || DATA[fromHash]) ? fromHash : defaultTab);
   $('footer-meta').textContent = '终端就绪 · 输入代码或名称查询';
 })();

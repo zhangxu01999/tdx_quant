@@ -181,11 +181,14 @@ class DuckDBMarketStore:
         market: str | None = None,
         stocks_only: bool = True,
         limit: int = 100,
+        offset: int = 0,
     ) -> pd.DataFrame:
         """读取最新证券快照；默认只返回沪深 A 股，支持代码或名称搜索。"""
 
         path = self._parquet_glob("security_list")
         row_limit = _checked_limit(limit, maximum=6_000)
+        if not 0 <= offset <= 100_000:
+            raise ValueError("offset must be between 0 and 100000")
         filters: list[str] = []
         parameters: list[object] = [path]
         if stocks_only:
@@ -207,7 +210,7 @@ class DuckDBMarketStore:
             pattern = f"%{compact_search}%"
             parameters.extend([pattern, pattern])
         where = "WHERE " + " AND ".join(filters) if filters else ""
-        parameters.append(row_limit)
+        parameters.extend([row_limit, offset])
         sql = f"""
             SELECT code, name, ts_code, market, date, pre_close
             FROM (
@@ -220,6 +223,7 @@ class DuckDBMarketStore:
             WHERE _row_number = 1
             ORDER BY code
             LIMIT ?
+            OFFSET ?
         """
         return self.connection.execute(sql, parameters).fetchdf()
 
