@@ -444,6 +444,11 @@ python -m scripts.tdx_mcp.tdx_data_enricher --all
 全市场历史行情继续按 `ts_code` 分区保存为 Parquet，DuckDB 直接扫描文件，不需要把
 5000 多只股票重复导入另一套数据库，也不会生成全市场巨型 JSON。安装项目依赖：
 
+本 fork 将 `data/` 作为跨设备研究快照纳入 Git。每次行情或证券主表同步完成后，应先在
+`tdx-quant` 提交并推送数据，再到父项目提交新的子模块指针；另一台电脑执行
+`git submodule update --init --recursive` 后即可取得同一批研究数据。数据提交只解决
+跨设备复现，不能代替每日增量同步。
+
 ```bash
 python -m pip install -r requirements.txt
 ```
