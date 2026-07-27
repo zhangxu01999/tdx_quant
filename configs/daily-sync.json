@@ -3,7 +3,7 @@
   "universe": "all-a-shares",
   "symbols": [],
   "max_symbols": null,
-  "history_bars": 800,
+  "history_bars": 2000,
   "refresh_bars": 30,
   "workers": 4,
   "retries": 2,
