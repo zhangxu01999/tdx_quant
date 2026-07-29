@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 from scripts.data_pipeline.connectors.pytdx_client import (
+    connect_first_available,
     connected_session,
     create_hq_api,
     fetch_bars_payload,
@@ -57,6 +58,42 @@ class TdxDownloader:
 
     def __init__(self, data_root: Path = DEFAULT_DATA_ROOT) -> None:
         self.data_root = Path(data_root)
+        # 批量任务可通过上下文管理器复用这一条连接。普通单次调用仍维持
+        # “调用时连接、结束后断开”的原行为，避免影响现有调用方。
+        self._session_api = None
+
+    def connect(self) -> "TdxDownloader":
+        """建立一条可复用的 HQ 连接；重复调用不会重复握手。"""
+
+        if self._session_api is not None:
+            return self
+        api = create_hq_api()
+        try:
+            connect_first_available(api)
+        except Exception:
+            api.disconnect()
+            raise
+        self._session_api = api
+        return self
+
+    def close(self) -> None:
+        """关闭批量任务持有的 HQ 连接。"""
+
+        api, self._session_api = self._session_api, None
+        if api is not None:
+            api.disconnect()
+
+    def reconnect(self) -> None:
+        """连接异常时只重连当前工作线程，不影响其他下载线程。"""
+
+        self.close()
+        self.connect()
+
+    def __enter__(self) -> "TdxDownloader":
+        return self.connect()
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
 
     # ------------------------------------------------------------------
     # market resolution
@@ -122,8 +159,8 @@ class TdxDownloader:
                 f'{code!r} resolves to channel {channel!r} (historical bars unavailable).'
             )
 
-        api = create_hq_api()
-        with connected_session(api):
+        api = self._session_api
+        if api is not None:
             payload = self._fetch_bars_paged(
                 api,
                 category=DAILY_BAR_CATEGORY,
@@ -131,6 +168,16 @@ class TdxDownloader:
                 code=code,
                 max_bars=max_bars,
             )
+        else:
+            api = create_hq_api()
+            with connected_session(api):
+                payload = self._fetch_bars_paged(
+                    api,
+                    category=DAILY_BAR_CATEGORY,
+                    market=int(market),
+                    code=code,
+                    max_bars=max_bars,
+                )
 
         if not payload:
             raise ValueError(f'No daily bars returned for code {code!r} (invalid code?)')

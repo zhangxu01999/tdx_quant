@@ -86,7 +86,11 @@ python -m scripts.data_pipeline.batch_daily --config configs/daily-sync.json
 
 首次下载每只股票最近 `history_bars` 根日线；后续运行只重新获取最近 `refresh_bars` 根，
 与本地历史合并并按时间去重。任务支持并发、逐股重试、断点续跑和 JSON 结果报告，单只股票失败
-不会覆盖其他股票的数据。PyCharm 可直接运行 `tdx-quant：股票池日线同步`。
+不会覆盖其他股票的数据。批量任务会为每个工作线程建立一条长连接并循环复用，而不是逐只股票
+重新连接；多个连接会轮换使用默认 TDX 节点。默认 `workers=8`，不要盲目继续增大并发。
+为避免 PyCharm 渲染数千行日志拖慢任务，默认每 `progress_every=20` 只输出一次进度，失败仍会
+立即输出，完整逐股结果保存在 `data/daily-sync-report.json`。
+PyCharm 可直接运行 `tdx-quant：股票池日线同步`。
 
 当前默认 `universe` 为 `all-a-shares`，会从 `data/security_list` 快照中解析全部沪深 A 股。
 如果只是小批量调试，可改回 `configured` 并手写 `symbols`，或保留全市场模式但设置

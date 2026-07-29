@@ -7,8 +7,10 @@ import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Queue
 from typing import Callable
 
 import pandas as pd
@@ -35,6 +37,7 @@ class DailySyncConfig:
     refresh_bars: int = 30
     workers: int = 4
     retries: int = 2
+    progress_every: int = 20
     max_symbols: int | None = None
     indices: tuple[tuple[str, int], ...] = ()
     report: Path | None = None
@@ -56,6 +59,7 @@ class DailySyncConfig:
             refresh_bars=int(payload.get("refresh_bars", 30)),
             workers=int(payload.get("workers", 4)),
             retries=int(payload.get("retries", 2)),
+            progress_every=int(payload.get("progress_every", 20)),
             max_symbols=(int(payload["max_symbols"]) if payload.get("max_symbols") else None),
             indices=indices,
             report=Path(str(payload["report"])) if payload.get("report") else None,
@@ -72,6 +76,8 @@ class DailySyncConfig:
             raise ValueError("workers must be between 1 and 16")
         if not 1 <= self.retries <= 10:
             raise ValueError("retries must be between 1 and 10")
+        if not 1 <= self.progress_every <= 1000:
+            raise ValueError("progress_every must be between 1 and 1000")
         if self.max_symbols is not None and self.max_symbols <= 0:
             raise ValueError("max_symbols must be positive")
         for code, market in self.indices:
@@ -191,7 +197,7 @@ def _write_checkpoint(
 def _sync_one(
     config: DailySyncConfig,
     code: str,
-    downloader_factory: Callable[[Path], TdxDownloader],
+    downloader: TdxDownloader,
     *,
     target_trade_date: str | None,
     previously_checked: set[str],
@@ -241,7 +247,7 @@ def _sync_one(
     last_error: Exception | None = None
     for attempt in range(1, config.retries + 1):
         try:
-            frame = downloader_factory(config.data_root).update_daily(
+            frame = downloader.update_daily(
                 code,
                 history_bars=config.history_bars,
                 refresh_bars=config.refresh_bars,
@@ -260,6 +266,13 @@ def _sync_one(
         except Exception as exc:  # noqa: BLE001 - each stock is retried and reported
             last_error = exc
             if attempt < config.retries:
+                reconnect = getattr(downloader, "reconnect", None)
+                if callable(reconnect):
+                    try:
+                        reconnect()
+                    except Exception:
+                        # 下一次 update_daily 会给出最终、可审计的失败原因。
+                        pass
                 time.sleep(attempt)
     return {
         "code": code,
@@ -267,6 +280,49 @@ def _sync_one(
         "error": f"{type(last_error).__name__}: {last_error}",
         "attempts": config.retries,
     }
+
+
+def _sync_partition(
+    config: DailySyncConfig,
+    codes: list[str],
+    downloader_factory: Callable[[Path], TdxDownloader],
+    *,
+    target_trade_date: str | None,
+    previously_checked: set[str],
+    output: Queue,
+) -> None:
+    """一个工作线程复用一个下载器和一条 TDX 连接处理整批股票。"""
+
+    completed = 0
+    try:
+        downloader = downloader_factory(config.data_root)
+        context = (
+            downloader
+            if hasattr(downloader, "__enter__") and hasattr(downloader, "__exit__")
+            else nullcontext(downloader)
+        )
+        with context as active_downloader:
+            for code in codes:
+                output.put(
+                    _sync_one(
+                        config,
+                        code,
+                        active_downloader,
+                        target_trade_date=target_trade_date,
+                        previously_checked=previously_checked,
+                    )
+                )
+                completed += 1
+    except Exception as exc:  # noqa: BLE001 - every unprocessed symbol must be reported
+        for code in codes[completed:]:
+            output.put(
+                {
+                    "code": code,
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "attempts": 0,
+                }
+            )
 
 
 def _sync_indices(
@@ -339,22 +395,31 @@ def run_sync(
     checked_symbols = _load_checked_symbols(checkpoint_path, target_trade_date)
     previously_checked = set(checked_symbols)
     results: list[dict[str, object]] = []
-    with ThreadPoolExecutor(max_workers=config.workers) as executor:
-        futures = {
+    # 股票按轮询方式均分给固定工作线程。每个线程只连接一次通达信，
+    # 避免 5200 多只股票逐只 TCP 握手，同时仍把并发限制在配置值内。
+    partitions = [
+        symbols[index::config.workers]
+        for index in range(config.workers)
+        if symbols[index::config.workers]
+    ]
+    output: Queue = Queue()
+    with ThreadPoolExecutor(max_workers=len(partitions)) as executor:
+        futures = [
             executor.submit(
-                _sync_one,
+                _sync_partition,
                 config,
-                code,
+                partition,
                 downloader_factory,
                 target_trade_date=target_trade_date,
                 previously_checked=previously_checked,
-            ): code
-            for code in symbols
-        }
+                output=output,
+            )
+            for partition in partitions
+        ]
         completed = 0
         completed_since_checkpoint = 0
-        for future in as_completed(futures):
-            result = future.result()
+        while completed < len(symbols):
+            result = output.get()
             results.append(result)
             completed += 1
             if target_trade_date is not None and result["status"] != "failed":
@@ -379,7 +444,17 @@ def run_sync(
                     f"{result['rows_before']} -> {result['rows_after']} rows, "
                     f"latest={result['latest_trade_date']}"
                 )
-            print(f"[{completed}/{len(symbols)}] {result['code']} {result['status']}: {message}")
+            if (
+                result["status"] == "failed"
+                or completed == len(symbols)
+                or completed % config.progress_every == 0
+            ):
+                print(
+                    f"[{completed}/{len(symbols)}] "
+                    f"{result['code']} {result['status']}: {message}"
+                )
+        for future in as_completed(futures):
+            future.result()
 
     if target_trade_date is not None:
         _write_checkpoint(

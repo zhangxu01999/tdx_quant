@@ -5,8 +5,9 @@
   "max_symbols": null,
   "history_bars": 2000,
   "refresh_bars": 30,
-  "workers": 4,
+  "workers": 8,
   "retries": 2,
+  "progress_every": 20,
   "indices": [
     {
       "code": "000001",

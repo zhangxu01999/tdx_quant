@@ -38,6 +38,17 @@ def test_resolve_configured_symbols_normalizes_suffix_and_deduplicates(tmp_path:
     assert resolve_symbols(config) == ["000001", "600000"]
 
 
+def test_progress_interval_is_configurable_and_validated(tmp_path: Path) -> None:
+    config = DailySyncConfig(
+        data_root=tmp_path,
+        symbols=("000001",),
+        progress_every=25,
+    )
+
+    config.validate()
+    assert config.progress_every == 25
+
+
 def test_all_a_share_universe_comes_from_security_snapshot(tmp_path: Path) -> None:
     leaf = tmp_path / "security_list" / "market=SZ" / "date=20260708"
     leaf.mkdir(parents=True)
@@ -163,3 +174,39 @@ def test_checkpoint_expires_when_index_target_advances(tmp_path: Path) -> None:
 
     assert report["skipped"] == 0
     assert _FakeDownloader.updated_codes == ["000001"]
+
+
+class _ReusableFakeDownloader(_FakeDownloader):
+    created = 0
+    opened = 0
+    closed = 0
+
+    def __init__(self, data_root: Path) -> None:
+        super().__init__(data_root)
+        type(self).created += 1
+
+    def __enter__(self):
+        type(self).opened += 1
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        type(self).closed += 1
+
+
+def test_run_sync_reuses_one_downloader_per_worker(tmp_path: Path) -> None:
+    _ReusableFakeDownloader.updated_codes = []
+    _ReusableFakeDownloader.created = 0
+    _ReusableFakeDownloader.opened = 0
+    _ReusableFakeDownloader.closed = 0
+    config = DailySyncConfig(
+        data_root=tmp_path,
+        symbols=tuple(f"{code:06d}" for code in range(1, 10)),
+        workers=3,
+    )
+
+    report = run_sync(config, downloader_factory=_ReusableFakeDownloader)
+
+    assert report["succeeded"] == 9
+    assert _ReusableFakeDownloader.created == 3
+    assert _ReusableFakeDownloader.opened == 3
+    assert _ReusableFakeDownloader.closed == 3

@@ -118,6 +118,32 @@ def test_download_daily_basic(fake_api: FakeHqApi, tmp_path: Path) -> None:
     assert dates == ['20240101', '20240102', '20240103']
 
 
+def test_connected_downloader_reuses_one_hq_connection(
+    fake_api: FakeHqApi,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fake_api.bars_for[(9, 0, '000001')] = [_bar(2024, 1, 2)]
+    fake_api.bars_for[(9, 0, '000002')] = [_bar(2024, 1, 2)]
+    connections = []
+
+    def fake_connect(api, hosts=None):
+        connections.append(api)
+        api.connected = True
+        return ('test', '127.0.0.1', 7709)
+
+    monkeypatch.setattr(tdx_module, 'connect_first_available', fake_connect)
+    downloader = TdxDownloader(data_root=tmp_path)
+
+    with downloader:
+        downloader.fetch_daily('000001')
+        downloader.fetch_daily('000002')
+        assert fake_api.connected is True
+
+    assert connections == [fake_api]
+    assert fake_api.connected is False
+
+
 def test_download_daily_persists_parquet(fake_api: FakeHqApi, tmp_path: Path) -> None:
     fake_api.bars_for[(9, 0, '000001')] = [
         _bar(2024, 1, 2),

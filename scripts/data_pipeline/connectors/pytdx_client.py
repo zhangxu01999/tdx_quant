@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from contextlib import contextmanager
+from itertools import count
 
 DEFAULT_HOSTS = (
     ('default', '119.147.212.81', 7709),
@@ -9,6 +10,7 @@ DEFAULT_HOSTS = (
     ('server_2', '115.238.90.165', 7709),
     ('server_3', '180.153.18.170', 7709),
 )
+_DEFAULT_HOST_CURSOR = count()
 
 
 def create_hq_api(**overrides):
@@ -30,9 +32,25 @@ def normalize_hosts(hosts: Iterable[tuple[str, str, int]] | None = None) -> list
     return normalized
 
 
+def rotate_hosts(
+    hosts: Iterable[tuple[str, str, int]],
+    offset: int,
+) -> list[tuple[str, str, int]]:
+    """轮换服务器优先级，让多个长连接均匀分散到默认 TDX 节点。"""
+
+    normalized = normalize_hosts(hosts)
+    if not normalized:
+        return []
+    start = offset % len(normalized)
+    return normalized[start:] + normalized[:start]
+
+
 def connect_first_available(api, hosts: Iterable[tuple[str, str, int]] | None = None) -> tuple[str, str, int]:
     last_error = None
-    for name, host, port in normalize_hosts(hosts):
+    candidates = normalize_hosts(hosts)
+    if hosts is None:
+        candidates = rotate_hosts(candidates, next(_DEFAULT_HOST_CURSOR))
+    for name, host, port in candidates:
         try:
             if api.connect(host, port):
                 return (name, host, port)
