@@ -1,0 +1,52 @@
+{
+  "data_root": "data",
+  "database": "data/intraday-paper.duckdb",
+  "watchlist": {
+    "manifest": "../quant-engine/output/aggressive-short-term-runs/latest-manifest.json",
+    "sections": [
+      "positions",
+      "target",
+      "observation"
+    ],
+    "manual_symbols": [],
+    "maximum_symbols": 200,
+    "maximum_age_days": 5
+  },
+  "quote_provider": {
+    "batch_size": 80,
+    "retries": 3,
+    "retry_backoff_seconds": 1.0
+  },
+  "service": {
+    "poll_seconds": 5.0,
+    "reconcile_time": "15:05",
+    "account_snapshot_every_polls": 12,
+    "maximum_consecutive_failures": 5
+  },
+  "signals": {
+    "average_volume_days": 5,
+    "minimum_volume_ratio": 1.5,
+    "breakout_lookback_minutes": 20,
+    "minimum_breakout_history_minutes": 5,
+    "breakout_buffer": 0.001,
+    "require_above_vwap": true,
+    "buy_score_threshold": 3.0,
+    "limit_touch_tolerance": 0.001,
+    "stop_loss_rate": 0.04,
+    "trailing_stop_rate": 0.06,
+    "vwap_exit_buffer": 0.01,
+    "sell_below_vwap": true,
+    "sell_on_bomb_limit_up": false
+  },
+  "paper_broker": {
+    "account_id": "intraday-paper",
+    "initial_cash": 1000000.0,
+    "maximum_positions": 4,
+    "position_fraction": 0.25,
+    "lot_size": 100,
+    "commission_rate": 0.0003,
+    "minimum_commission": 5.0,
+    "stamp_tax_rate": 0.0005,
+    "slippage_rate": 0.0005
+  }
+}

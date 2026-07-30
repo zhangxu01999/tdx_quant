@@ -108,6 +108,60 @@ PyCharm 可直接运行 `tdx-quant：股票池日线同步`。
 `all-a-shares` 依赖已经下载的 `data/security_list` 快照；证券列表存在不等于日线已经落盘，
 回测端只会扫描 `data/daily/ts_code=*/` 中实际下载成功的股票。
 
+### 盘中观察池与模拟交易
+
+先运行 `quant-engine` 的激进短线一键流水线。流水线会在每次结果目录生成
+`intraday-watchlist.json`，其中包含最后一个日频决策的观察候选、实际目标和当前持仓。
+随后在交易日上午运行：
+
+```bash
+python -m scripts.data_pipeline.intraday_paper_cli \
+  --config configs/intraday-paper.json
+```
+
+PyCharm 可直接选择 `tdx-quant：盘中观察池模拟交易`。进程只轮询观察池，不扫描全市场：
+
+1. 09:30～11:30、13:00～15:00 复用一条 pytdx 长连接，默认每 5 秒分批读取实时快照；
+2. 原始快照和本地聚合的 1 分钟 K 线写入 `data/intraday-paper.duckdb`；
+3. 计算按交易进度校正的量比、累计成交均价线、过去 20 分钟突破、炸板和回封；
+4. 满足“放量 + 分时突破 + 站上均价线”或“炸板后重新回封”时生成模拟买单；
+5. 止损、移动止损或明显跌破均价线时生成模拟卖单；
+6. 信号不会使用同一个报价成交，订单等待下一次快照；模拟账户遵守整手、费用、滑点、
+   最大持仓数、T+1，以及涨跌停无对手盘时不可成交；
+7. 15:05 用 pytdx 最新日 K 对账收盘价、成交量和成交额，记录收盘权益后退出。
+
+这是一套本地模拟交易系统，不连接券商，也不会发送真实委托。首次运行前必须先更新日线并
+运行日频研究流水线；配置默认拒绝使用超过 5 个自然日的旧观察池。市场风险关闭时只监控已有
+持仓，不会把“仅观察”候选转成买单。
+
+常用检查命令：
+
+```bash
+# 非交易时间只测试一次 pytdx 连接和落盘，不持续运行
+python -m scripts.data_pipeline.intraday_paper_cli \
+  --config configs/intraday-paper.json --once --ignore-session
+
+# 不联网，查看数据库各表行数、现金和持仓
+python -m scripts.data_pipeline.intraday_paper_cli \
+  --config configs/intraday-paper.json --status
+
+# 日线稍晚发布时，手工重跑指定日期的收盘对账
+python -m scripts.data_pipeline.intraday_paper_cli \
+  --config configs/intraday-paper.json --reconcile-only --trade-date 2026-07-30
+```
+
+主要配置都在 `configs/intraday-paper.json`：观察池来源、手工补充代码、轮询间隔、量比和
+突破阈值、止损、账户资金、持仓数量、费用与滑点均可直接修改。DuckDB 主要表如下：
+
+| 表 | 用途 |
+|---|---|
+| `realtime_snapshots` | 每次 pytdx 原始快照及标准字段 |
+| `minute_bars_1m` | 按累计成交量差分聚合的 1 分钟 OHLCV |
+| `intraday_signals` | 量比、均价线、突破、炸板、回封和买卖原因 |
+| `paper_orders` / `paper_trades` | 模拟委托和下一快照成交 |
+| `paper_positions` / `paper_account_snapshots` | 模拟持仓和账户权益 |
+| `daily_reconciliation` | 快照聚合与盘后日 K 的差异 |
+
 ### 短线日频增强特征
 
 短线策略除了 OHLCV，还需要成交额、换手率、流通市值、涨跌停和炸板等字段。日线同步完成后运行：
