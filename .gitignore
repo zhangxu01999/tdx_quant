@@ -1,6 +1,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.idea/*
+!.idea/runConfigurations/
+!.idea/runConfigurations/*.xml
 .venv/
 venv/
 # 行情和派生 Parquet 作为跨设备研究快照纳入版本管理。
