@@ -1,0 +1,54 @@
+{
+  "data_root": "data",
+  "database": "data/intraday-paper.duckdb",
+  "output": "data/auction-review-latest.json",
+  "universe": {
+    "mode": "all-a-shares",
+    "symbols": [],
+    "allowed_boards": [],
+    "maximum_symbols": null
+  },
+  "watchlist": {
+    "manifest": "../quant-engine/output/aggressive-short-term-main-board-runs/latest-manifest.json",
+    "sections": [
+      "positions",
+      "target",
+      "observation"
+    ],
+    "manual_symbols": [],
+    "maximum_symbols": 200,
+    "maximum_age_days": 5
+  },
+  "schedule": {
+    "capture_time": "09:25:05",
+    "latest_start_time": "09:29:20",
+    "latest_capture_time": "09:29:50",
+    "server_time_earliest": "09:24:30",
+    "server_time_latest": "09:29:59",
+    "wait_until_capture_time": true
+  },
+  "quote_provider": {
+    "batch_size": 80,
+    "retries": 3,
+    "retry_backoff_seconds": 1.0,
+    "progress_every_batches": 10,
+    "minimum_coverage": 0.85,
+    "minimum_server_time_coverage": 0.8
+  },
+  "baseline_days": 5,
+  "scoring": {
+    "market_gap_weight": 0.25,
+    "industry_gap_weight": 0.2,
+    "volume_ratio_weight": 0.2,
+    "amount_ratio_weight": 0.25,
+    "order_imbalance_weight": 0.1,
+    "daily_score_weight": 0.6,
+    "auction_score_weight": 0.4,
+    "minimum_entry_gap": -0.03,
+    "maximum_entry_gap": 0.05,
+    "minimum_buy_score": 60,
+    "sell_watch_gap": -0.03,
+    "sell_watch_score": 25,
+    "minimum_industry_members": 5
+  }
+}

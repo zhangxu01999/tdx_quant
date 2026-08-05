@@ -162,6 +162,49 @@ python -m scripts.data_pipeline.intraday_paper_cli \
 | `paper_positions` / `paper_account_snapshots` | 模拟持仓和账户权益 |
 | `daily_reconciliation` | 快照聚合与盘后日 K 的差异 |
 
+### 9:25集合竞价同步与候选复核
+
+日频主板策略在前一日收盘后产生观察池。建议交易日上午9:20左右提前启动集合竞价任务，
+程序会先在本地准备全市场近5日基线，再等待到`09:25:05`，然后复用一条通达信长连接，
+以每批80只的方式串行读取本地证券主表中的
+全部沪深A股：
+
+```bash
+python -m scripts.data_pipeline.auction_open_cli \
+  --config configs/auction-open.json
+```
+
+PyCharm可以直接选择`tdx-quant：9点25集合竞价同步与复核`。该任务会：
+
+1. 从`data/security_master_daily`最新快照读取股票代码、板块和行业，不临时联网补股票名单；
+2. 从主板激进短线最新成功流水线读取昨日持仓、目标和观察候选；
+3. 在9:25以后抓取竞价价格、前收盘、累计量额、买一卖一及其数量；
+4. 根据本地近5日日线计算竞价量比和竞价金额比例；
+5. 计算市场/行业竞价涨幅百分位、量额百分位和买卖盘不平衡；
+6. 将昨日得分与竞价得分融合，输出`BUY_ALLOWED`、`BUY_REJECTED`、`WATCH`、`HOLD`或
+   `SELL_WATCH`影子建议。
+
+快照和特征分别写入现有`data/intraday-paper.duckdb`的`auction_snapshots`与
+`auction_features`，最新人工复核文件写入`data/auction-review-latest.json`。重复运行同一
+交易日会按股票替换，不会产生重复记录。查看本地状态无需联网：
+
+```bash
+python -m scripts.data_pipeline.auction_open_cli \
+  --config configs/auction-open.json --status
+```
+
+当前配置为`shadow`影子模式：它只记录“如果使用竞价因子会如何调整”的建议，不会自动
+创建模拟订单。原因是历史日K无法还原竞价量额和挂单结构，应先从启用日开始积累至少20个
+交易日，再决定是否让该因子真正拦截买入或触发卖出。即使以后启用执行，9:25以后观察到的
+竞价结果也只能使用9:30后的下一条行情撮合，绝不能反填为已经按9:25竞价价格成交。
+
+配置默认读取
+`../quant-engine/output/aggressive-short-term-main-board-runs/latest-manifest.json`，与当前沪深
+主板策略口径一致。运行前必须先同步最新日线和证券主表、再运行主板激进短线流水线；超过
+5个自然日的旧观察池会明确拒绝。`--ignore-session`仅用于人工连通性测试，测试数据仍记录
+真实采集时间，不能冒充9:25正式竞价样本。正式运行还会检查通达信返回的服务器时间，至少
+80%的有效快照必须落在09:24:30～09:29:59，否则按休市日或行情节点陈旧处理并停止评分。
+
 ### 短线日频增强特征
 
 短线策略除了 OHLCV，还需要成交额、换手率、流通市值、涨跌停和炸板等字段。日线同步完成后运行：

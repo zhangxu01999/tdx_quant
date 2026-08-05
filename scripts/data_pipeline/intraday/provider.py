@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -87,13 +87,22 @@ class PytdxWatchlistProvider:
                     time.sleep(self.retry_backoff_seconds * (attempt + 1))
         raise ConnectionError("pytdx watchlist request failed after retries") from last_error
 
-    def fetch_quotes(self, symbols: Iterable[str]) -> list[QuoteSnapshot]:
+    def iter_quote_batches(
+        self,
+        symbols: Iterable[str],
+    ) -> Iterator[list[QuoteSnapshot]]:
+        """逐批返回实时行情，方便全市场任务边下载边落盘。
+
+        集合竞价需要在很短的时间窗口内读取数千只股票。生成器仍然只复用
+        当前这一条连接，但每完成一批就把结果交给调用方；即使后续批次失败，
+        已经收到的快照也可以保留并审计。
+        """
+
         requested = []
         for symbol in symbols:
             value = str(symbol).strip().upper()
             code = value[:6]
             requested.append((infer_hq_market(code), code))
-        rows: list[QuoteSnapshot] = []
         for batch in _chunks(requested, self.batch_size):
             def request(api, batch=batch):
                 payload = fetch_quotes_payload(api, batch)
@@ -104,6 +113,7 @@ class PytdxWatchlistProvider:
             payload = self._run_with_reconnect(request)
             received_at = self.clock()
             by_code = {str(row.get("code") or ""): dict(row) for row in payload}
+            rows: list[QuoteSnapshot] = []
             for market, code in batch:
                 row = by_code.get(code)
                 if row is None:
@@ -116,6 +126,14 @@ class PytdxWatchlistProvider:
                 )
                 if snapshot is not None:
                     rows.append(snapshot)
+            yield rows
+
+    def fetch_quotes(self, symbols: Iterable[str]) -> list[QuoteSnapshot]:
+        """读取全部请求证券；观察池轮询继续使用原有列表返回口径。"""
+
+        rows: list[QuoteSnapshot] = []
+        for batch in self.iter_quote_batches(symbols):
+            rows.extend(batch)
         return rows
 
     def fetch_latest_daily(self, symbols: Iterable[str]) -> dict[str, dict[str, Any]]:

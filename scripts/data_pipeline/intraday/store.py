@@ -50,6 +50,52 @@ CREATE TABLE IF NOT EXISTS realtime_snapshots (
     PRIMARY KEY (received_at, symbol)
 );
 
+CREATE TABLE IF NOT EXISTS auction_snapshots (
+    captured_at TIMESTAMP NOT NULL,
+    trade_date DATE NOT NULL,
+    symbol VARCHAR NOT NULL,
+    stage VARCHAR NOT NULL,
+    price DOUBLE NOT NULL,
+    previous_close DOUBLE,
+    open DOUBLE,
+    cumulative_volume DOUBLE,
+    cumulative_amount DOUBLE,
+    current_volume DOUBLE,
+    bid1 DOUBLE,
+    ask1 DOUBLE,
+    bid1_volume DOUBLE,
+    ask1_volume DOUBLE,
+    raw_json VARCHAR,
+    PRIMARY KEY (trade_date, symbol, stage)
+);
+
+CREATE TABLE IF NOT EXISTS auction_features (
+    calculated_at TIMESTAMP NOT NULL,
+    trade_date DATE NOT NULL,
+    symbol VARCHAR NOT NULL,
+    name VARCHAR,
+    board VARCHAR,
+    industry VARCHAR,
+    candidate_source VARCHAR,
+    candidate_rank INTEGER,
+    daily_score DOUBLE,
+    auction_price DOUBLE NOT NULL,
+    auction_gap DOUBLE,
+    auction_volume_ratio DOUBLE,
+    auction_amount_ratio DOUBLE,
+    bid_ask_imbalance DOUBLE,
+    market_gap_percentile DOUBLE,
+    industry_gap_percentile DOUBLE,
+    volume_ratio_percentile DOUBLE,
+    amount_ratio_percentile DOUBLE,
+    auction_score DOUBLE,
+    combined_score DOUBLE,
+    review_action VARCHAR,
+    review_reason VARCHAR,
+    details_json VARCHAR,
+    PRIMARY KEY (trade_date, symbol)
+);
+
 CREATE TABLE IF NOT EXISTS minute_bars_1m (
     minute_start TIMESTAMP NOT NULL,
     trade_date DATE NOT NULL,
@@ -379,6 +425,97 @@ class IntradayDuckDBStore:
                         minute_start,
                     ],
                 )
+            self.connection.execute("COMMIT")
+        except Exception:
+            self.connection.execute("ROLLBACK")
+            raise
+
+    def record_auction_snapshots(
+        self,
+        snapshots: Sequence[QuoteSnapshot],
+        *,
+        stage: str = "final",
+    ) -> None:
+        """保存集合竞价快照，不把9:25累计量误算为连续竞价分钟K线。"""
+
+        rows = [
+            (
+                snapshot.received_at,
+                snapshot.trade_date,
+                snapshot.symbol,
+                stage,
+                snapshot.price,
+                snapshot.previous_close,
+                snapshot.open,
+                snapshot.cumulative_volume,
+                snapshot.cumulative_amount,
+                snapshot.current_volume,
+                snapshot.bid1,
+                snapshot.ask1,
+                snapshot.bid1_volume,
+                snapshot.ask1_volume,
+                snapshot.raw_json,
+            )
+            for snapshot in snapshots
+        ]
+        if rows:
+            self.connection.executemany(
+                """
+                INSERT OR REPLACE INTO auction_snapshots
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def record_auction_features(self, records: Sequence[Mapping[str, Any]]) -> None:
+        """原子替换一天的竞价评分，重复运行不会制造重复证券。"""
+
+        columns = [
+            "calculated_at",
+            "trade_date",
+            "symbol",
+            "name",
+            "board",
+            "industry",
+            "candidate_source",
+            "candidate_rank",
+            "daily_score",
+            "auction_price",
+            "auction_gap",
+            "auction_volume_ratio",
+            "auction_amount_ratio",
+            "bid_ask_imbalance",
+            "market_gap_percentile",
+            "industry_gap_percentile",
+            "volume_ratio_percentile",
+            "amount_ratio_percentile",
+            "auction_score",
+            "combined_score",
+            "review_action",
+            "review_reason",
+            "details_json",
+        ]
+        rows = [
+            [
+                record.get(column)
+                if column != "details_json"
+                else _json(record.get("details") or {})
+                for column in columns
+            ]
+            for record in records
+        ]
+        if not rows:
+            return
+        self.connection.execute("BEGIN TRANSACTION")
+        try:
+            self.connection.executemany(
+                f"""
+                INSERT OR REPLACE INTO auction_features
+                ({", ".join(columns)})
+                VALUES ({", ".join("?" for _ in columns)})
+                """,
+                rows,
+            )
             self.connection.execute("COMMIT")
         except Exception:
             self.connection.execute("ROLLBACK")
@@ -967,6 +1104,8 @@ class IntradayDuckDBStore:
         tables: Iterable[str] = (
             "watchlist_history",
             "realtime_snapshots",
+            "auction_snapshots",
+            "auction_features",
             "minute_bars_1m",
             "intraday_signals",
             "paper_orders",

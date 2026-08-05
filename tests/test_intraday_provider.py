@@ -66,3 +66,23 @@ def test_provider_reuses_one_connection_and_batches_quotes() -> None:
     assert len(api.quote_calls) == 2
     assert [quote.symbol for quote in quotes] == ["000001.SZ", "600519.SH"]
     assert daily["000001.SZ"]["close"] == 10.0
+
+
+def test_provider_can_yield_each_quote_batch_before_the_next_request() -> None:
+    api = FakeApi()
+    provider = PytdxWatchlistProvider(
+        batch_size=1,
+        retries=0,
+        api_factory=lambda: api,
+        clock=lambda: datetime(2026, 7, 30, 9, 25, 5),
+    )
+
+    with provider:
+        batches = provider.iter_quote_batches(["000001.SZ", "600519.SH"])
+        first = next(batches)
+        assert len(api.quote_calls) == 1
+        second = next(batches)
+
+    assert [value.symbol for value in first] == ["000001.SZ"]
+    assert [value.symbol for value in second] == ["600519.SH"]
+    assert len(api.quote_calls) == 2
