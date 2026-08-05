@@ -205,6 +205,63 @@ python -m scripts.data_pipeline.auction_open_cli \
 真实采集时间，不能冒充9:25正式竞价样本。正式运行还会检查通达信返回的服务器时间，至少
 80%的有效快照必须落在09:24:30～09:29:59，否则按休市日或行情节点陈旧处理并停止评分。
 
+### 全市场历史9:25竞价数据库
+
+通达信历史成交接口可以回查每天9:25最终集合竞价成交。历史数据只精确到分钟，能够提供
+最终成交价、成交量和买卖方向，不能还原9:20～9:24的中间虚拟撮合盘口、挂单队列或预计
+匹配量。历史回填使用独立任务：
+
+```bash
+python -m scripts.data_pipeline.historical_auction_cli \
+  --config configs/auction-history-sync.json
+```
+
+PyCharm可以直接选择`tdx-quant：全市场历史9点25竞价同步`。父项目中对应启动项为
+`5.全市场历史9点25竞价同步`。任务具有以下约束：
+
+1. 每个交易日都从当天的`security_master_daily`快照读取上市股票，避免拿今天的5200只
+   股票倒灌历史造成幸存者偏差；
+2. 全程只使用一条通达信连接串行请求，网络异常才重连，不并发访问行情节点；
+3. 历史成交接口从收盘向开盘倒序分页，程序跳过最新一页并向9:25方向查询，命中后立即
+   停止，不下载和保存全天逐笔；
+4. 每50只股票原子更新一次检查点。中断或关机后重新运行会跳过已完成股票；连续10只失败
+   会主动停止，避免断网时生成大量假“无数据”；
+5. 每个股票、每个交易日固定落一行。`success`表示取得9:25真实成交，`no_auction_trade`
+   表示只有零量标记，`no_auction`表示有历史成交但没有9:25记录，`no_data`通常表示停牌或
+   当日无成交；真正的请求异常记为`failed`且不会把该交易日标记完成。
+
+数据按天写入：
+
+```text
+data/auction_history_daily/trade_date=YYYYMMDD/data.parquet
+```
+
+核心字段包括`auction_price`、`auction_volume_lots`、`auction_volume_shares`、
+`auction_amount`、`buyorsell`、状态和分页审计字段。通达信历史成交量单位按“手”保存，
+股数按`手数 × 100`、成交额按`价格 × 股数`计算。只查看本地进度不联网：
+
+```bash
+python -m scripts.data_pipeline.historical_auction_cli \
+  --config configs/auction-history-sync.json --status
+```
+
+首次运行前建议先做小范围真实验证：
+
+```bash
+python -m scripts.data_pipeline.historical_auction_cli \
+  --config configs/auction-history-sync.json --max-days 1 --max-symbols 20
+```
+
+命令行使用`--max-symbols`时会自动写入独立的`auction_history_daily_smoke`目录，不会让
+小样本结果冒充全市场交易日分区，也不会阻挡后续正式回填。
+
+默认按日期倒序回填，先得到最近样本。当前能回填的起止范围严格受
+`data/security_master_daily`覆盖限制；如果要扩展到多年，必须先把历史证券主表同步到相同
+起始日，否则任务会明确拒绝运行。全市场一年约130万“股票×交易日”记录，但底层接口不是
+全市场批量接口，每只股票每天通常需要1～3次请求，因此多年首次建库需要分批持续运行，
+不是一次几分钟的同步。可在配置中设置`maximum_days`分段，或通过命令行`--start/--end`
+指定日期范围。
+
 ### 短线日频增强特征
 
 短线策略除了 OHLCV，还需要成交额、换手率、流通市值、涨跌停和炸板等字段。日线同步完成后运行：

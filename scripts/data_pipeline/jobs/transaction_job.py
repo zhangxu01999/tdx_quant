@@ -7,8 +7,11 @@ from scripts.data_pipeline.code_mapping import market_code_to_ts_code
 from scripts.data_pipeline.extractors.tdx_transactions import transactions_to_dataframe
 from scripts.data_pipeline.materializers.raw_writer import write_raw_by_date_symbol
 
-# HQ history-transaction server caps each call at 2000 rows.
+# Different HQ nodes have been observed returning either 1800 or 2000 rows even
+# when 2000 are requested.  The caller must therefore advance by the number of
+# rows actually returned and may only treat an empty page as end-of-data.
 PAGE_SIZE = 2000
+MAX_PAGES = 1000
 
 
 def run_transaction_job(
@@ -25,12 +28,16 @@ def run_transaction_job(
     """
     rows: list[dict] = []
     start = 0
-    while True:
+    for _page_number in range(MAX_PAGES):
         page = list(fetch_page(start, page_size))
-        rows.extend(page)
-        if len(page) < page_size:
+        if not page:
             break
-        start += page_size
+        rows.extend(page)
+        start += len(page)
+    else:  # pragma: no cover - defensive guard for a broken upstream endpoint
+        raise RuntimeError(
+            f"transaction paging exceeded {MAX_PAGES} pages for {code} on {trade_date}"
+        )
 
     df = transactions_to_dataframe(rows, market=market, code=code, trade_date=trade_date)
     ts_code = market_code_to_ts_code(int(market), str(code))

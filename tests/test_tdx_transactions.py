@@ -122,19 +122,44 @@ def test_run_transaction_job_pages_full_day(tmp_path: Path) -> None:
     assert result["ts_code"] == "000001.SZ"
     assert result["trade_date"] == "20260617"
     assert result["records"] == 4539
-    assert calls == [(0, 2000), (2000, 2000), (4000, 2000)]
+    assert calls == [(0, 2000), (2000, 2000), (4000, 2000), (4539, 2000)]
     assert (tmp_path / "tdx_transactions" / "date=20260617" / "ts_code=000001.SZ" / "data.parquet").exists()
 
 
 def test_run_transaction_job_single_short_page(tmp_path: Path) -> None:
     from scripts.data_pipeline.jobs.transaction_job import run_transaction_job
 
+    calls: list[int] = []
+
     def fetch_page(start: int, count: int) -> list[dict]:
-        assert start == 0
-        return _txn_rows(3)
+        calls.append(start)
+        return _txn_rows(3) if start == 0 else []
 
     result = run_transaction_job(
         fetch_page=fetch_page, market=1, code="600000", trade_date="2026-06-18", output_root=tmp_path
     )
     assert result["ts_code"] == "600000.SH"
     assert result["records"] == 3
+    assert calls == [0, 3]
+
+
+def test_run_transaction_job_handles_server_page_cap(tmp_path: Path) -> None:
+    from scripts.data_pipeline.jobs.transaction_job import run_transaction_job
+
+    pages = {0: _txn_rows(1800), 1800: _txn_rows(1800), 3600: _txn_rows(125)}
+    calls: list[int] = []
+
+    def fetch_page(start: int, count: int) -> list[dict]:
+        calls.append(start)
+        return pages.get(start, [])
+
+    result = run_transaction_job(
+        fetch_page=fetch_page,
+        market=0,
+        code="000001",
+        trade_date="20260617",
+        output_root=tmp_path,
+    )
+
+    assert result["records"] == 3725
+    assert calls == [0, 1800, 3600, 3725]

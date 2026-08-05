@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="tdx-quant：全市场历史9点25竞价同步" type="PythonConfigurationType" factoryName="Python">
+    <module name="tdx-quant" />
+    <option name="ENV_FILES" value="" />
+    <option name="INTERPRETER_OPTIONS" value="-u" />
+    <option name="PARENT_ENVS" value="true" />
+    <envs>
+      <env name="PYTHONUNBUFFERED" value="1" />
+      <env name="PYTHONPATH" value="$PROJECT_DIR$" />
+      <env name="UV_NO_SYNC" value="1" />
+      <env name="UV_OFFLINE" value="1" />
+    </envs>
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+    <option name="IS_MODULE_SDK" value="true" />
+    <option name="ADD_CONTENT_ROOTS" value="true" />
+    <option name="ADD_SOURCE_ROOTS" value="true" />
+    <option name="SCRIPT_NAME" value="scripts.data_pipeline.historical_auction_cli" />
+    <option name="PARAMETERS" value="--config configs/auction-history-sync.json" />
+    <option name="MODULE_MODE" value="true" />
+    <option name="SHOW_COMMAND_LINE" value="false" />
+    <option name="EMULATE_TERMINAL" value="false" />
+    <option name="REDIRECT_INPUT" value="false" />
+    <option name="INPUT_FILE" value="" />
+    <method v="2" />
+  </configuration>
+</component>

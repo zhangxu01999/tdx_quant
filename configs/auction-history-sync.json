@@ -1,0 +1,19 @@
+{
+  "data_root": "data",
+  "start": null,
+  "end": null,
+  "date_order": "descending",
+  "page_size": 1800,
+  "initial_offset": 1800,
+  "retries": 3,
+  "retry_backoff_seconds": 1.0,
+  "request_delay_seconds": 0.05,
+  "checkpoint_every": 50,
+  "progress_every": 20,
+  "maximum_consecutive_failures": 10,
+  "maximum_days": null,
+  "maximum_symbols": null,
+  "retry_no_data": false,
+  "output_domain": "auction_history_daily",
+  "report": "data/auction-history-sync-report.json"
+}
