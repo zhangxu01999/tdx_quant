@@ -2,7 +2,8 @@
 
 正常用法是在交易日上午提前启动。程序默认等待到9:25:05，然后复用一条
 通达信长连接串行分批读取全市场，不会为每只股票单独建连，也不会并发轰炸
-行情节点。当前版本只落库和生成影子建议，不会发送真实或模拟委托。
+行情节点。默认只落库和生成影子建议；显式启用 ``java_broker`` 后，只向
+Pig PAPER 账户发送模拟信号，任何模式下都不会向真实券商报单。
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from scripts.data_pipeline.intraday.auction import (
     build_auction_features,
     build_auction_report,
 )
+from scripts.data_pipeline.intraday.java_broker import JavaBrokerConfig, JavaPaperBrokerClient
 from scripts.data_pipeline.intraday.provider import PytdxWatchlistProvider
 from scripts.data_pipeline.intraday.service import load_daily_baselines
 from scripts.data_pipeline.intraday.store import IntradayDuckDBStore
@@ -334,6 +336,13 @@ def run_capture(
         table_counts = store.table_counts()
 
     report = build_auction_report(features)
+    java_broker = JavaPaperBrokerClient(
+        JavaBrokerConfig.from_mapping(_mapping(payload.get("java_broker"), "java_broker"))
+    )
+    remote_acceptances = java_broker.publish_auction_features(
+        features,
+        calculated_at=calculated_at,
+    )
     report.update(
         {
             "status": "success",
@@ -357,6 +366,11 @@ def run_capture(
             },
             "database": str(database),
             "table_counts": table_counts,
+            "java_broker": {
+                "enabled": java_broker.enabled,
+                "published": len(remote_acceptances),
+                "acceptances": remote_acceptances,
+            },
             "output": str(output),
         }
     )

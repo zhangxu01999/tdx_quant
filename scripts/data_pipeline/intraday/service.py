@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 import duckdb
 
 from .models import DailyBaseline, QuoteSnapshot, WatchItem
+from .java_broker import JavaPaperBrokerClient
 from .paper import PaperBroker
 from .provider import PytdxWatchlistProvider, SHANGHAI_TZ
 from .signals import IntradaySignalEngine
@@ -142,6 +143,7 @@ class IntradayPaperService:
         baselines: Mapping[str, DailyBaseline],
         signal_engine: IntradaySignalEngine,
         broker: PaperBroker,
+        java_broker: JavaPaperBrokerClient | None = None,
         config: IntradayServiceConfig | None = None,
         clock: Callable[[], datetime] | None = None,
         sleeper: Callable[[float], None] = time_module.sleep,
@@ -162,6 +164,7 @@ class IntradayPaperService:
         self.baselines = dict(baselines)
         self.signal_engine = signal_engine
         self.broker = broker
+        self.java_broker = java_broker
         self.config = config or IntradayServiceConfig()
         self.clock = clock or (lambda: datetime.now(SHANGHAI_TZ).replace(tzinfo=None))
         self.sleeper = sleeper
@@ -172,13 +175,40 @@ class IntradayPaperService:
 
         values = list(snapshots)
         by_symbol = {snapshot.symbol: snapshot for snapshot in values}
+        # 先用本轮报价撮合上一轮已受理订单；本轮新信号只能等待下一次报价。
+        remote_fills = self.java_broker.process_quotes(values) if self.java_broker else []
+        remote_state = self.java_broker.account_state() if self.java_broker else None
+        remote_positions = {
+            str(value["symbol"]): {
+                "symbol": str(value["symbol"]),
+                "quantity": int(value.get("totalQuantity") or 0),
+                "available_quantity": int(value.get("availableQuantity") or 0),
+                "average_price": float(value.get("averageCost") or 0),
+                "highest_price": float(
+                    value.get("highestPrice") or value.get("lastPrice") or 0
+                ),
+                "last_price": float(value.get("lastPrice") or 0),
+                "updated_at": value.get("updatedAt"),
+                "source": "java_authoritative_account",
+            }
+            for value in (remote_state or {}).get("positions", [])
+            if int(value.get("totalQuantity") or 0) > 0
+        }
         fills = self.broker.process_open_orders(by_symbol)
         orders: list[dict[str, Any]] = []
+        remote_acceptances: list[dict[str, Any]] = []
         signals = []
         for snapshot in values:
             self.store.record_snapshot(snapshot)
             self.store.update_position_mark(self.broker.config.account_id, snapshot)
-            position = self.store.positions(self.broker.config.account_id).get(snapshot.symbol)
+            local_position = self.store.positions(self.broker.config.account_id).get(
+                snapshot.symbol
+            )
+            position = (
+                remote_positions.get(snapshot.symbol)
+                if self.java_broker and self.java_broker.enabled
+                else local_position
+            )
             previous = self.store.previous_minutes(
                 snapshot.symbol,
                 snapshot.received_at.replace(second=0, microsecond=0),
@@ -200,6 +230,14 @@ class IntradayPaperService:
                 previous_snapshots,
             )
             self.store.record_signal(signal)
+            if self.java_broker:
+                acceptance = self.java_broker.publish_intraday_signal(
+                    signal,
+                    snapshot,
+                    allow_new_entry=self.entry_allowed.get(snapshot.symbol, False),
+                )
+                if acceptance is not None:
+                    remote_acceptances.append(acceptance)
             orders.extend(
                 self.broker.create_orders(
                     signal,
@@ -226,6 +264,10 @@ class IntradayPaperService:
             "sell_signals": sum(signal.sell_signal for signal in signals),
             "orders": orders,
             "fills": fills,
+            "remote_acceptances": remote_acceptances,
+            "remote_fills": remote_fills,
+            "remote_account": (remote_state or {}).get("summary"),
+            "remote_position_count": len(remote_positions),
             "account": account_snapshot,
         }
 
@@ -273,12 +315,14 @@ class IntradayPaperService:
             prices=close_prices,
             source="daily_reconciliation",
         )
+        remote_settlement = self.java_broker.settle(trade_date) if self.java_broker else None
         return {
             "trade_date": trade_date.isoformat(),
             "matched": sum(row["status"] == "matched" for row in rows),
             "exceptions": [row for row in rows if row["status"] != "matched"],
             "expired_orders": expired_orders,
             "account": account,
+            "remote_settlement": remote_settlement,
         }
 
     def run(self, *, once: bool = False, ignore_session: bool = False) -> dict[str, Any]:

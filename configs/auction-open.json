@@ -50,5 +50,18 @@
     "sell_watch_gap": -0.03,
     "sell_watch_score": 25,
     "minimum_industry_members": 5
+  },
+  "java_broker": {
+    "enabled": false,
+    "base_url": "http://127.0.0.1:9999/admin",
+    "api_key_env": "QUANT_SIGNAL_API_KEY",
+    "account_id": 1,
+    "strategy_name": "aggressive-short-term",
+    "strategy_version": "1",
+    "target_weight": 0.25,
+    "maximum_notional": null,
+    "timeout_seconds": 5.0,
+    "publish_auction_buy_ready": true,
+    "publish_auction_sell_watch": false
   }
 }

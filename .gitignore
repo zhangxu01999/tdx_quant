@@ -13,6 +13,7 @@ data/.daily-sync-checkpoint.json
 data/.auction-history-checkpoints/
 data/auction-history-sync-report.json
 data/auction-history-smoke-report.json
+data/auction-review-latest.json
 data/auction_history_daily_smoke/
 # 盘中模拟数据库持续增长且包含本机运行状态，不作为跨设备历史行情快照提交。
 data/*.duckdb

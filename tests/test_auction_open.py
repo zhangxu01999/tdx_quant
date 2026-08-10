@@ -236,7 +236,8 @@ def test_capture_pipeline_uses_local_master_and_writes_shadow_report(tmp_path) -
         "watchlist": {
             "manifest": str(manifest_path),
             "maximum_symbols": 20,
-            "maximum_age_days": 5,
+            # 本测试验证采集/落库，不重复测试观察池时效；避免固定日期随当前日期失效。
+            "maximum_age_days": None,
         },
         "quote_provider": {"minimum_coverage": 1.0, "progress_every_batches": 0},
         "baseline_days": 3,

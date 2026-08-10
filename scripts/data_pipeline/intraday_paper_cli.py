@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from scripts.data_pipeline.intraday.paper import PaperBroker, PaperBrokerConfig
+from scripts.data_pipeline.intraday.java_broker import JavaBrokerConfig, JavaPaperBrokerClient
 from scripts.data_pipeline.intraday.provider import PytdxWatchlistProvider
 from scripts.data_pipeline.intraday.service import (
     IntradayPaperService,
@@ -129,7 +130,10 @@ def _build_runtime(payload: Mapping[str, Any]):
         average_days=signal_config.average_volume_days,
         as_of=loaded.source_as_of,
     )
-    return database, loaded, signal_config, broker_config, service_config, provider, baselines
+    java_broker = JavaPaperBrokerClient(
+        JavaBrokerConfig.from_mapping(_mapping(payload.get("java_broker"), "java_broker"))
+    )
+    return database, loaded, signal_config, broker_config, service_config, provider, baselines, java_broker
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -163,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         service_config,
         provider,
         baselines,
+        java_broker,
     ) = _build_runtime(payload)
     print(
         f"watchlist loaded: symbols={len(loaded.items)} "
@@ -186,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
             baselines=baselines,
             signal_engine=IntradaySignalEngine(signal_config),
             broker=broker,
+            java_broker=java_broker,
             config=service_config,
         )
         if args.reconcile_only:

@@ -48,5 +48,16 @@
     "minimum_commission": 5.0,
     "stamp_tax_rate": 0.0005,
     "slippage_rate": 0.0005
+  },
+  "java_broker": {
+    "enabled": false,
+    "base_url": "http://127.0.0.1:9999/admin",
+    "api_key_env": "QUANT_SIGNAL_API_KEY",
+    "account_id": 1,
+    "strategy_name": "aggressive-short-term",
+    "strategy_version": "1",
+    "target_weight": 0.25,
+    "maximum_notional": null,
+    "timeout_seconds": 5.0
   }
 }
